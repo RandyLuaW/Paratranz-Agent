@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..client import ParaTranzClient
-from ..config import LLMCfg
+from ..config import AgentConfig, LLMCfg
 from ..llm import BaseLLM, UsageEvent, UnavailableLLM, build_llm
 from ..pipelines import (
     GlossaryPipeline,
@@ -72,6 +72,7 @@ class AppContext:
         self._store: Store | None = None
         self._llms: dict[str, BaseLLM] = {}
         self._llm_fps: dict[str, tuple] = {}
+        self._cfg_cache: tuple[RuntimeSettings, str, AgentConfig] | None = None
         self._fingerprint: tuple | None = None
 
     @property
@@ -201,12 +202,28 @@ class AppContext:
         """默认 provider 的实例（兼容旧调用）。"""
         return self.llm_for("")
 
-    def cfg_for(self, task: str = ""):
-        return self.settings.to_agent_config(self.state_dir, self.settings.resolve_for(task))
+    def cfg_for(self, task: str = "") -> AgentConfig:
+        """按任务取 pipeline 用的配置对象。
+
+        `AgentConfig` 由 `RuntimeSettings` 现算（见 `to_agent_config`），
+        缓存键用**设置对象本身**：`SettingsStore.load()` 每次保存都换新对象，
+        所以对象身份变了就等于配置变了，不必再手写一份字段指纹
+        （那种指纹漏一个字段就会读到旧配置，属于自己给自己埋坑）。
+        """
+        s = self.settings
+        got = s.resolve_for(task)
+        ref = join_ref(got[0].id, got[1].id) if got else ""
+        hit = self._cfg_cache
+        if hit is not None and hit[0] is s and hit[1] == ref:
+            return hit[2]
+        cfg = s.to_agent_config(self.state_dir, got)
+        self._cfg_cache = (s, ref, cfg)
+        return cfg
 
     @property
-    def cfg(self):
-        return self.settings.to_agent_config(self.state_dir)
+    def cfg(self) -> AgentConfig:
+        """默认模型下的配置（`to_agent_config(..., None)` 等价于 `cfg_for("")`）。"""
+        return self.cfg_for("")
 
     def guard(self) -> None:
         """写操作前的统一检查（凭据 / 演练模式 / 预算）。"""

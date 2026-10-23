@@ -310,6 +310,23 @@ class RuntimeSettings(BaseModel):
     def to_agent_config(
         self, base_dir: Path, resolved: tuple[ProviderCfg, ModelCfg] | None = None
     ) -> AgentConfig:
+        """把「落盘/界面形态」翻译成「领域形态」，是两者之间**唯一**的桥。
+
+        为什么保留两套形态而不是并成一套：
+        - `RuntimeSettings` 的形状由持久化与界面决定 —— 扁平的键、
+          `providers`/`routing`/`prompts`/`budget` 这些 WebUI 概念，
+          CLI 用不上，YAML 里也没有。
+        - `AgentConfig` 的形状由流水线决定 —— `translate.batch_size`、
+          `review.pass_stage` 这类调参项集中在各自环节下，
+          它们在界面上不暴露，写进 yaml 的人才会关心。
+
+        真正的重复不是这两个模型，而是**手抄字段表**：凡是靠人肉同步的地方
+        都会漂移（`PUT /api/settings` 的补丁模型就吃过这个亏，现在改成从
+        `RuntimeSettings` 自动派生）。所以这里刻意只保留一处映射，
+        新增字段就在这里加一行，别处不再有自己的配置实现。
+
+        `AgentConfig.resolve()` 会叠加环境变量覆盖（CLI 沿用 yaml + env 的行为）。
+        """
         got = resolved or self.resolve_for("")
         p, m = got if got else (None, None)
         cfg = AgentConfig.model_validate(

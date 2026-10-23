@@ -120,6 +120,12 @@ class StyleGuideCfg(BaseModel):
 
 
 class AgentConfig(BaseModel):
+    """流水线看到的配置形态（领域形状）：按环节分节，只放该环节用得到的项。
+
+    两个来源都收敛到它：CLI 从 `config/agent.yaml` + 环境变量读，
+    WebUI 从 `RuntimeSettings.to_agent_config()` 换算。因此流水线
+    永远只认这一种类型，不需要知道自己是被 CLI 还是被界面驱动的。
+    """
     # 配置文件所在目录：相对 state_dir 按它解析（而非 cwd），
     # 这样从任何目录调用 ptz 状态都不会落到意外位置。
     _base_dir: Path | None = PrivateAttr(default=None)

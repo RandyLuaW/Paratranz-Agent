@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import create_model
 
 from ...client import ParaTranzError
 from ...pipelines.glossary import PROPOSE_SYSTEM
@@ -13,40 +13,25 @@ from ...pipelines.translate import SYSTEM_PROMPT as TRANSLATE_SYSTEM
 from ..agent import AGENT_SYSTEM
 from ..deps import Deps
 from ..extractor_agent import SYSTEM_PROMPT as EXTRACTOR_SYSTEM
-from ..settings import PROMPT_LABELS, PROMPT_TASKS
+from ..settings import PROMPT_LABELS, PROMPT_TASKS, RuntimeSettings
 
+# 这几个字段各有专用端点（providers/routing/prompts/budget/pricing），
+# 不走「打补丁」这条路，所以补丁模型里排除它们。
+_PATCH_EXCLUDE = {"providers", "routing", "prompts", "budget", "pricing_overrides"}
 
-class SettingsPatch(BaseModel):
-    project_id: int | None = None
-    token: str | None = None
-    base_url: str | None = None
-    rate_limit_per_min: int | None = None
-    llm_base_url: str | None = None
-    llm_model: str | None = None
-    llm_key: str | None = None
-    llm_concurrency: int | None = None
-    llm_temperature: float | None = None
-    llm_max_tokens: int | None = None
-    llm_timeout: float | None = None
-    llm_max_retries: int | None = None
-    llm_fallback_models: str | None = None
-    llm_context_max_turns: int | None = None
-    llm_keep_recent_ratio: float | None = None
-    agent_max_steps: int | None = None
-    agent_tool_timeout: int | None = None
-    system_prompt_prefix: str | None = None
-    style: str | None = None
-    batch_size: int | None = None
-    review_pass_stage: int | None = None
-    review_block_on: str | None = None
-    max_strings_per_task: int | None = None
-    task_prefix: str | None = None
-    dry_run: bool | None = None
-    per_run_limit: int | None = None
-    # 回写默认值：留空字段不覆盖（PUT /api/settings 只应用非 None）
-    writeback_out_dir: str | None = None
-    writeback_mode: str | None = None
-    writeback_min_stage: int | None = None
+# `PUT /api/settings` 的补丁模型：字段表由 `RuntimeSettings` **自动派生**。
+# 手抄一份的代价已经付过 —— 新增 `writeback_*` 三项时忘了同步，
+# pydantic 把未知字段静默丢掉：PUT 返回 200，配置却没落盘，界面从此对不上。
+# 派生之后新增字段自动进补丁，这类漂移不可能再发生。
+# 语义：全部字段可选，只应用非 None 的那些（留空 = 不改）。
+SettingsPatch = create_model(
+    "SettingsPatch",
+    **{
+        name: (f.annotation | None, None)
+        for name, f in RuntimeSettings.model_fields.items()
+        if name not in _PATCH_EXCLUDE
+    },
+)
 
 
 DEFAULT_PROMPTS = {
