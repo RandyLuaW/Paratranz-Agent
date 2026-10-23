@@ -313,7 +313,8 @@ class StyleGuidePipeline:
 
         if dry_run:
             return {"title": title, "action": "update" if existing else "create", "dry_run": True,
-                    "length": len(md)}
+                    "length": len(md),
+                    "samples_error": getattr(self, "_samples_error", "")}
 
         if existing:
             payload: dict = {"content": md, "bumped": cfg.bumped}
