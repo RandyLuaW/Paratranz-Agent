@@ -1,0 +1,27 @@
+id: generic-json
+name: 通用 JSON
+engine: generic
+version: 1.0.0
+desc: 递归遍历 JSON，按路径模式提取字符串。适合 data/*.json、locale/*.json、i18n 文件。
+input_hint: 指向游戏根目录或含 JSON 的子目录
+entry: run.py
+builtin: true
+args:
+  - name: glob
+    label: 文件匹配
+    default: "**/*.json"
+    hint: 支持 ** 递归，如 data/*.json
+  - name: paths
+    label: 提取路径
+    default: "*.name,*.description,*.nickname,*.profile,*.message,*.text"
+    hint: 逗号分隔，支持通配；留空表示所有字符串
+  - name: min_len
+    label: 最短长度
+    default: "2"
+  - name: max_len
+    label: 最长长度
+    default: "5000"
+  - name: skip_keys
+    label: 额外跳过的键
+    default: ""
+    hint: 逗号分隔，如 note,meta

@@ -1,0 +1,29 @@
+id: generic-regex
+name: 通用正则
+engine: generic
+version: 1.0.0
+desc: 扫文本文件按正则抓取。适合 Ren'Py 的 .rpy 对话、自定义 txt/csv/ini。
+input_hint: 指向游戏根目录
+entry: run.py
+builtin: true
+args:
+  - name: glob
+    label: 文件匹配
+    default: "**/*.rpy"
+    hint: Ren'Py 用 **/*.rpy，纯文本用 **/*.txt
+  - name: pattern
+    label: 正则
+    default: '"([^"\n]{2,})"'
+    hint: 默认抓双引号内的字符串；**不要允许跨行**（含 \n 的匹配会让行号定位失效，回写时无法还原）
+  - name: group
+    label: 取第几组
+    default: "1"
+  - name: min_len
+    label: 最短长度
+    default: "2"
+  - name: max_len
+    label: 最长长度
+    default: "5000"
+  - name: encoding
+    label: 编码
+    default: "utf-8"

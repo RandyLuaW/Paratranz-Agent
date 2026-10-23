@@ -1,0 +1,12 @@
+# 换行归一化：
+# 源码统一 LF，CI 里的 sha 自检与 diff 才稳定；
+# 但 Windows 启动器必须是 CRLF —— cmd 解析 LF-only 的 .bat 时，
+# 一旦和 chcp/中文混排就会错位（实测踩过）。
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 截图等二进制，Git 不要尝试做文本 diff
+*.png binary
+*.jpg binary
+*.ico binary

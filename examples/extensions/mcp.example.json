@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Games\\MyGame"],
+      "env": {},
+      "enabled": true,
+      "description": "读写工作区文件的 MCP 服务器"
+    }
+  }
+}

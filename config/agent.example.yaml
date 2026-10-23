@@ -1,0 +1,71 @@
+# paratranz-agent 配置示例。复制为 config/agent.yaml 后按需修改：
+#     cp config/agent.example.yaml config/agent.yaml
+# 或者直接 `ptz init`。
+#
+# 密钥不要写在这里：用环境变量（或 .env）
+#     PTZ_API_TOKEN      ParaTranz 个人 Token（paratranz.cn/users/my → 设置）
+#     PTZ_LLM_API_KEY    OpenAI 兼容服务的 Key
+
+project:
+  id: 6896                   # 你的项目编号（paratranz.cn/projects/<id> 里的 id）
+  name: "My Game"
+  source_lang: en
+  target_lang: zh-CN
+  style: "简体中文，口语自然，保留角色语气与口癖；专有名词严格遵循术语表；系统提示简洁直给"
+
+api:
+  base_url: https://paratranz.cn/api
+  rate_limit_per_min: 420    # 平台硬限 480/min（按用户计），留余量避免 429
+  timeout: 60
+
+llm:
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  temperature: 0.2
+  concurrency: 4             # 并发批次数；429 频繁时降到 2
+  batch_size: 40             # 单次请求最多带多少条词条
+
+translate:
+  batch_size: 40
+  tm_top_k: 5                # 每批塞几条 TM 参考
+  tm_min_score: 0.45
+  enforce_terms: true
+  use_platform_suggestions: false   # 平台 suggestions 接口必须串行，慢；默认关
+  force_overwrite: false     # true 会覆盖人工译文，慎用
+  files: []                  # 只处理路径含这些子串的文件，例：["Map", "quest"]
+  min_length: 1
+
+review:
+  block_on: error            # error / warn / info —— 达到该级别即打回
+  llm_second_pass: true
+  pass_stage: 3              # 3 已检查（一次校对项目）/ 5 已审核（二次校对项目）
+  fail_stage: 2              # 2 有疑问
+  length_ratio_limit: 3.5
+  ascii_ratio_limit: 0.55
+  batch_size: 20
+
+tasks:
+  max_strings_per_task: 800  # 单任务词条上限，超出拆批
+  max_files_per_task: 6
+  goal:
+    translate: 1.0
+    check: 0.0
+    review: 0.0
+  pin: true
+  deadline_days: null        # null = 长期有效
+  title_prefix: "[自动分派]"
+
+glossary:
+  min_occurrences: 3         # 候选词最低出现次数
+  max_terms: 200
+  llm_propose: true
+
+styleguide:
+  internal: true             # 公告仅项目成员可见
+  category: announcement
+  bumped: true               # 置顶
+
+# 本地 TM / 术语 / 账本（SQLite）。相对路径按**本配置文件所在目录**解析，
+# 所以配置在 config/ 下时写 ../.ptz-state 才会落在项目根。
+state_dir: ../.ptz-state

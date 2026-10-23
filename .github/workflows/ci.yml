@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 一套跑完就够：这是纯 Python 包 + 零构建前端，没有需要分平台构建的产物。
+# 之所以仍然上 windows-latest，是因为本项目大量逻辑与 Windows 路径/编码行为纠缠
+# （GBK 控制台、CRLF、反斜杠），只在 Linux 上绿过一次后再回 Windows 炸过太多次。
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+
+    env:
+      # 控制台默认 GBK，中文日志会 mojibake；测试内部也按 utf-8 落盘
+      PYTHONIOENCODING: utf-8
+      # 测试环境必须显式清掉这些，否则「未配置凭据」的分支断言会失效
+      PTZ_API_TOKEN: ""
+      PTZ_LLM_API_KEY: ""
+      OPENAI_API_KEY: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: 静态检查（未定义名/语法/常见 bug）
+        run: >-
+          python -m ruff check --select F,E9,B,S102,S301,S307,S506,S608,ASYNC
+          src tests smoke.py web_smoke.py tools
+
+      - name: 单元测试
+        run: python -m pytest tests -q
+
+      - name: 冒烟（假平台端到端：分派 → 翻译 → 校对 → 术语 → 规范）
+        run: python smoke.py
+
+      - name: WebUI 冒烟（真 HTTP；没有 node 时自动退化成静态检查）
+        run: python web_smoke.py

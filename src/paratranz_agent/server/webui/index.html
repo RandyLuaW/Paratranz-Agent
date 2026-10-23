@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Paratranz Agent · 汉化控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f8cff'/%3E%3Ctext x='16' y='23' font-size='19' text-anchor='middle' fill='white' font-family='sans-serif'%3E%E8%AF%91%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+<script>
+  // 首帧前就把主题定好（否则会先闪一下深色）：
+  // localStorage 里用户选过的优先，没有就跟系统 prefers-color-scheme。
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('ptz-theme'); } catch (e) { t = null; }
+    if (t !== 'light' && t !== 'dark') {
+      t = (window.matchMedia
+        && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+    }
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+</head>
+<body>
+
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-overview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+    <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+  </symbol>
+  <symbol id="i-jobs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/>
+  </symbol>
+  <symbol id="i-files" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>
+  </symbol>
+  <symbol id="i-extract" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 4h16v5H4z"/><path d="M4 9v11h16V9"/><path d="M12 9v6"/><path d="M9.5 12.5L12 15l2.5-2.5"/>
+  </symbol>
+  <symbol id="i-writeback" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+    <path d="M12 17V9"/><path d="M9 12l3-3 3 3"/>
+  </symbol>
+  <symbol id="i-tools" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 4a4 4 0 0 1 5 5l-9.5 9.5a2.1 2.1 0 0 1-3-3z"/><path d="M4 4l4 4"/>
+  </symbol>
+  <symbol id="i-models" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9.5" y="9.5" width="5" height="5"/>
+    <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>
+  </symbol>
+  <symbol id="i-project" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+  </symbol>
+  <symbol id="i-data" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6"/><rect x="12" y="8" width="3" height="10"/><rect x="17" y="5" width="3" height="13"/>
+  </symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>
+  </symbol>
+  <symbol id="i-usage" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9"/><path d="M15 9.5a3.5 3.5 0 0 0-3-1.5c-1.7 0-3 1-3 2.2 0 3 6 1.4 6 4.3 0 1.3-1.3 2.3-3 2.3a3.5 3.5 0 0 1-3-1.5"/>
+    <path d="M12 6v2M12 16v2"/>
+  </symbol>
+  <symbol id="i-prompt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12.5h5"/>
+  </symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/>
+    <rect x="3" y="13" width="8" height="8" rx="2"/><path d="M17 13v8M13 17h8"/>
+  </symbol>
+</svg>
+
+<div id="app">
+  <div class="layout">
+
+    <aside class="side" id="nav">
+      <div class="brand"><img class="logo" src="/static/logo.webp" alt="Paratranz Agent"><span class="bname">Paratranz <b>Agent</b></span></div>
+
+      <div class="navsep">工作台</div>
+      <button data-view="overview" class="active"><svg><use href="#i-overview"/></svg>概览</button>
+      <button data-view="jobs"><svg><use href="#i-jobs"/></svg>任务<span class="badge" id="badgeJobs"></span></button>
+      <button data-view="files"><svg><use href="#i-files"/></svg>文件</button>
+      <button data-view="extract"><svg><use href="#i-extract"/></svg>提取</button>
+      <button data-view="writeback"><svg><use href="#i-writeback"/></svg>回写</button>
+      <button data-view="tools"><svg><use href="#i-tools"/></svg>工具</button>
+
+      <div class="navsep">配置</div>
+      <button data-view="models"><svg><use href="#i-models"/></svg>模型</button>
+      <button data-view="prompts"><svg><use href="#i-prompt"/></svg>提示词</button>
+      <button data-view="settings"><svg><use href="#i-project"/></svg>项目</button>
+
+      <div class="navsep">观测</div>
+      <button data-view="data"><svg><use href="#i-data"/></svg>数据</button>
+      <button data-view="logs"><svg><use href="#i-logs"/></svg>日志</button>
+      <button data-view="usage"><svg><use href="#i-usage"/></svg>开销</button>
+
+      <div class="navsep">扩展</div>
+      <button data-view="extensions"><svg><use href="#i-ext"/></svg>插件与技能</button>
+
+      <button id="themeToggle" title="切换深色 / 浅色">☾ 深色</button>
+      <div class="foot" id="verFoot">v0.3.0</div>
+    </aside>
+
+    <div class="mainwrap">
+      <div class="topbar">
+        <div class="crumb" id="crumb">工作台 / <b>概览</b></div>
+        <div class="spacer"></div>
+        <label class="switch" title="开启后所有写操作只预览不落地">
+          <input type="checkbox" id="dryRun">
+          <span>演练模式</span>
+        </label>
+        <span class="pill" id="connState">连接中…</span>
+      </div>
+      <main id="main"></main>
+    </div>
+
+  </div>
+
+  <section class="logs collapsed" id="logPanel">
+    <div class="loghead" id="logHead">
+      <span class="dot" id="sseDot"></span>
+      <span>实时日志</span>
+      <span class="dim" id="logCount"></span>
+      <div class="spacer"></div>
+      <span class="dim" id="logToggle">展开</span>
+    </div>
+    <div class="logbody" id="logBody"></div>
+  </section>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

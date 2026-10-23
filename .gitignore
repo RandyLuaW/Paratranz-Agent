@@ -1,0 +1,33 @@
+# 凭据与本地产物（绝不提交）
+.ptz-state/
+.ptz-smoke/
+.ptz-web/
+.ptz-backup/
+.env
+config/agent.yaml
+*.local.yaml
+
+# 本地调试的中间产物
+.audit/
+.tmp*
+.playwright-mcp/
+.audit_probe.py
+.pytest_out.txt
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+.ptz-shots/

@@ -1,0 +1,13 @@
+# 插件元信息：id / name / version / desc / pages
+name: demo-plugin
+display_name: 示例插件
+desc: 用来验证插件导入、启停与移除的占位插件
+short_desc: 示例
+version: 0.1.0
+author: paratranz-agent
+repo: ""
+# 声明 WebUI 页面（预留：接入运行引擎后可按 #/plugin-view/<id>/<page> 打开）
+pages:
+  - name: dashboard
+    title: 示例面板
+    entry_file: index.html
