@@ -239,7 +239,6 @@ def register(app: FastAPI, d: Deps) -> None:
                 "keep_recent_ratio": s.llm_keep_recent_ratio,
                 "agent_max_steps": s.agent_max_steps,
                 "agent_tool_timeout": s.agent_tool_timeout,
-                "system_prompt_prefix": s.system_prompt_prefix,
             },
             "providers": [x.masked() for x in s.providers],
             "routing": s.routing.as_dict(),

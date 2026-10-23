@@ -2345,6 +2345,8 @@ async function showExtractionDetail(main, jid) {
           <div class="row">
             <button class="btn sm" id="x_copy">复制 JSON</button>
             <button class="btn sm" id="x_import">导入平台</button>
+            <button class="btn sm" id="x_upload"
+                    title="把这份提取结果打包成 JSON 上传成平台上的一个新文件">上传为新文件</button>
             <button class="btn sm" id="x_writeback"
                     title="把平台上已达门槛的译文按这些 key 写回游戏文件">回写译文</button>
           </div>
@@ -2389,6 +2391,78 @@ async function showExtractionDetail(main, jid) {
 
     const wbBtn = $('#x_writeback');
     if (wbBtn) wbBtn.onclick = () => openWritebackDialog(jid);
+
+    // 上传为新文件：与「导入平台」并列的另一条路。
+    // 区别要在界面上讲明白 —— 导入是往已有文件里逐条补 key（慢，但格式无关），
+    // 上传是新建文件让平台自己解析（快，但依赖项目格式是 JSON）。
+    $('#x_upload').onclick = () => {
+      const el = document.createElement('div');
+      el.className = 'modal';
+      el.innerHTML = `
+        <div class="modal-box" style="width:min(620px,94vw)">
+          <div class="modal-head"><b>${t('上传为新文件')}</b></div>
+          <div class="modal-body">
+            <div class="formrow"><label class="lbl">${t('文件名（须 .json 结尾）')}</label>
+              <input class="field" id="up_name" value="extract-${esc(jid)}.json"></div>
+            <div class="formrow"><label class="lbl">${t('目标目录（可选，如 locale/）')}</label>
+              <input class="field" id="up_path" placeholder="${t('留空 = 项目根目录')}"></div>
+            <label class="switch"><input type="checkbox" id="up_force">
+              <span>${t('强制上传（跳过校验错误）')}</span></label>
+            <div class="notice" style="font-size:11.5px;margin-top:8px">
+              ${t('平台按项目格式解析上传内容：本项目格式若不是 JSON（如 twee、gettext），上传后可能建不出词条。所以务必先点「仅预览」看一眼内容。')}
+            </div>
+          </div>
+          <div id="up_preview"></div>
+          <div class="modal-foot">
+            <span class="dim" id="up_msg" style="font-size:11.5px"></span>
+            <div class="spacer"></div>
+            <button class="btn" id="up_cancel">${t('取消')}</button>
+            <button class="btn" id="up_preview_btn">${t('仅预览')}</button>
+            <button class="btn primary" id="up_do">${t('上传')}</button>
+          </div>
+        </div>`;
+      document.body.appendChild(el);
+      el.onclick = (ev) => { if (ev.target === el) el.remove(); };
+      $('#up_cancel', el).onclick = () => el.remove();
+      const payload = () => ({
+        filename: $('#up_name', el).value.trim() || 'extract.json',
+        path: $('#up_path', el).value.trim(),
+        force: $('#up_force', el).checked,
+      });
+
+      $('#up_preview_btn', el).onclick = async () => {
+        const box = $('#up_preview', el);
+        box.innerHTML = `<div class="dim" style="font-size:11.5px;margin-top:8px">${t('生成预览…')}</div>`;
+        try {
+          const r = await api('POST', `/api/extractions/${jid}/upload`,
+            { ...payload(), dry_run: true });
+          box.innerHTML = `
+            <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
+              <div class="row" style="gap:8px;margin-bottom:6px">
+                <b style="font-size:12.5px">${t('预览')}</b>
+                <span class="tag ok">${r.count} ${t('条词条')}</span>
+                <span class="tag">${r.bytes} ${t('字节')}</span>
+                <span class="dim" style="font-size:11px">${t('不会写入平台')}</span>
+              </div>
+              <pre class="result" style="max-height:200px;overflow:auto">${esc((r.preview || []).join('\n'))}</pre>
+              <div class="dim" style="font-size:11px;margin-top:4px">${esc(L(r, 'note'))}</div>
+            </div>`;
+        } catch (e) {
+          box.innerHTML = `<div style="color:var(--err);font-size:11.5px;margin-top:8px">${esc(e.message)}</div>`;
+        }
+      };
+
+      $('#up_do', el).onclick = async () => {
+        $('#up_msg', el).textContent = t('上传中…');
+        try {
+          const r = await api('POST', `/api/extractions/${jid}/upload`, payload());
+          el.remove();
+          toast(t('已提交上传任务') + ` ${r.job ? r.job.id : ''}` + t('，跑完自动加载结果…'));
+        } catch (e) {
+          $('#up_msg', el).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
+        }
+      };
+    };
 
     $('#x_import').onclick = async () => {
       if (!files.length) {
@@ -2486,7 +2560,8 @@ async function showExtractionDetail(main, jid) {
 }
 
 /* ---- 回写：把平台上已达门槛的译文写回游戏文件 ---- */
-// 反向链路。in_place 会直接覆盖游戏文件（后端会先备份到 .ptz-backup/<时间戳>/），
+// 反向链路。in_place 会直接覆盖游戏文件（后端会先备份到
+// <state-dir>/writeback/<提取记录 id>/backup-<时间戳>/，同秒重复运行会各占一个目录），
 // 危险等级和「执行提取器」同级，所以沿用 confirmRisk 那套做法：
 // 醒目警示 + 显式勾选确认 + 5 秒倒计时，倒计时结束前提交按钮禁用。
 const WB_STAGES = [
@@ -2651,7 +2726,7 @@ function wbParamsHtml() {
       <div class="notice warn" style="margin-top:10px">
         <b>⚠ 会直接覆盖游戏文件</b><br>
         回写会按提取记录里的 key 改写<b>游戏目录中的原始文件</b>。
-        覆盖前会自动备份到 <code>.ptz-backup/&lt;时间戳&gt;/</code>，但备份仅用于回滚，
+        覆盖前会自动备份到 <code>&lt;state-dir&gt;/writeback/&lt;提取记录 id&gt;/backup-&lt;时间戳&gt;/</code>，但备份仅用于回滚，
         本工具不对回写结果做任何担保，
         <b style="color:var(--warn)">因原地回写造成的一切后果由使用者自行承担</b>。
       </div>

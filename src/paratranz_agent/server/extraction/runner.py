@@ -18,6 +18,24 @@ from .jsonl import read_jsonl
 from .paths import _job_root
 from .registry import ExtractorMeta, get_extractor
 
+# 不传给提取器子进程的环境变量。
+# 理由：提取器脚本是本机执行的任意代码，它 `print(os.environ)` 就能把
+# `PTZ_API_TOKEN` / `OPENAI_API_KEY` 这类凭据写进 run.log，而 run.log 又会
+# 通过 `/api/extractions/{jid}` 明文回显给前端 —— 整条路绕开了日志脱敏。
+# 提取器根本用不到这些变量（参数走 `--opt` 与 `PTZ_OPTIONS`）。
+_SECRET_ENV_PREFIXES = ("PTZ_API_", "PTZ_LLM_", "PTZ_TOKEN", "OPENAI_", "ANTHROPIC_",
+                        "AZURE_OPENAI_", "GOOGLE_API_", "DASHSCOPE_", "MOONSHOT_",
+                        "DEEPSEEK_", "RIVER_", "GEMINI_", "XAI_", "ZHIPU_")
+_SECRET_ENV_SUFFIXES = ("_API_KEY", "_API_TOKEN", "_ACCESS_TOKEN", "_TOKEN", "_SECRET",
+                        "_SECRET_KEY", "_PASSWORD", "_PASSWD")
+
+
+def _is_secret_env(name: str) -> bool:
+    """这个环境变量名看起来是凭据吗（宁可多挡，提取器不需要它们）。"""
+    upper = name.upper()
+    return upper.startswith(_SECRET_ENV_PREFIXES) or upper.endswith(_SECRET_ENV_SUFFIXES)
+
+
 @dataclass
 class ExtractionResult:
     job_id: str
@@ -76,7 +94,7 @@ def run_extractor(
         cmd.extend(["--opt", f"{k}={v}"])
 
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if not _is_secret_env(k)},
         "PYTHONIOENCODING": "utf-8",
         "PTZ_INPUT": str(gdir),
         "PTZ_OUTPUT": str(out_file),

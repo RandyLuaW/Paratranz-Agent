@@ -626,6 +626,62 @@ def tool_extraction_import(
     }
 
 
+def tool_extraction_upload(
+    ctx: AppContext,
+    *,
+    extraction_id: str = "",
+    filename: str = "",
+    path: str = "",
+    force: bool = False,
+    job=None,
+    runner=None,
+    **_: Any,
+) -> dict:
+    """把提取结果**上传成一个新文件**（`POST /files`）。
+
+    与 `extraction_import` 的分工：
+    - `extraction_import` 往**已有文件**里补 key（逐条 `POST /strings`，几千条要跑很久）；
+    - 本工具新建一个文件，平台自己按项目格式解析并建词条（一次请求，快得多）。
+
+    前提是项目格式能吃这份内容：我们产出的是 `{key: original}` 的 JSON 对象，
+    `json` 格式的项目直接可用；其它格式（twee / gettext）解析不出词条 ——
+    所以路由层强制先「预览」，把内容给用户看一眼再决定传不传。
+    """
+    from .extraction import export_upload_json, load_entries, normalize, validate
+
+    if not extraction_id:
+        raise ValueError("缺少 extraction_id")
+    name = (filename or "").strip() or "extract.json"
+    if not name.lower().endswith(".json"):
+        # 平台按扩展名挑解析器；名字对不上就会出现"传上去了但没词条"
+        raise ValueError("上传文件名必须以 .json 结尾（平台按扩展名选解析器）")
+
+    entries = load_entries(ctx.state_dir, extraction_id)
+    report = validate(entries)
+    merged, _ = normalize(entries)
+    if report["errors"] and not force:
+        raise RuntimeError(
+            "校验有 " + str(report["stats"]["error_count"]) + " 个错误，先修或勾选强制上传"
+        )
+
+    def log(msg: str, level: str = "info") -> None:
+        if job and runner:
+            runner.log(job, msg, level=level)
+
+    content = export_upload_json(merged)
+    log(
+        "准备上传 " + name + "：" + str(len(merged)) + " 条词条，"
+        + str(len(content)) + " 字节" + ("，目录 " + path if path else "")
+    )
+    item = ctx.client.create_file(name, content, path=path or "")
+    log(f"平台已建文件 id={item.id} name={item.name}", level="info")
+    return {
+        "file": {"id": item.id, "name": item.name, "path": path or ""},
+        "uploaded": len(merged),
+        "bytes": len(content),
+    }
+
+
 def tool_extractor_generate(
     ctx: AppContext,
     *,
@@ -788,6 +844,7 @@ def build_registry(ctx: AppContext) -> dict[str, Callable[..., dict]]:
         "extractor_generate": bind(tool_extractor_generate),
         "extractor_improve": bind(tool_extractor_improve),
         "extraction_import": bind(tool_extraction_import),
+        "extraction_upload": bind(tool_extraction_upload),
         "writeback": bind(tool_writeback),
     }
 
@@ -924,6 +981,19 @@ TOOL_SPECS: list[dict[str, Any]] = [
                    "force": "跳过校验错误"},
         "writes": True,
         "endpoint": "POST /projects/{id}/strings",
+    },
+    {
+        "name": "extraction_upload",
+        "label": "上传为新文件",
+        "label_en": "Upload as new file",
+        "description": "把提取结果打成一个 JSON 文件上传，平台按项目格式解析并自动建词条（只适用于 json 格式项目）",
+        "description_en": "Package the extraction as a JSON file and upload it; the platform "
+                          "parses it per the project format and creates strings automatically "
+                          "(json-format projects only)",
+        "params": {"extraction_id": "提取记录 id", "filename": "上传文件名（须 .json 结尾）",
+                   "path": "目标目录（可选，如 locale/）", "force": "跳过校验错误"},
+        "writes": True,
+        "endpoint": "POST /projects/{id}/files",
     },
     {
         "name": "writeback",

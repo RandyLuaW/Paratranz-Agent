@@ -106,6 +106,52 @@ def _unwrap_file(data: Any) -> dict:
     raise ValueError(f"上传接口返回体无法识别：{str(data)[:200]}")
 
 
+class BatchWrite(list):
+    """批量写回的返回值：**仍然是 `list[int]`**（现有调用方照旧遍历、取长度），
+    额外带一个 `reported` —— 平台确认改动的条数。
+
+    两者必须分开：`PUT /strings` 的响应形状不止一种，除了 id 数组，还有只给
+    条数的 `{"update": N}`。只回条数时 `len(res)` 是 0，上层据此报「写回 0 条」
+    就是误导（stage 其实已经改完）；而凭空造 id 又会让 TM/账本记到错的词条上。
+    所以：`len(res)` = 确知其 id 的条数，`reported` = 平台报告的改动条数 ——
+    「改了 N 条但不知道是哪几条」和「一条都没改」由此可以区分。
+    """
+
+    def __init__(self, ids: Iterable[int] = (), *, reported: int):
+        super().__init__(ids)
+        self.reported = int(reported)
+
+
+# `PUT /strings` 只回条数时的字段名（平台不同版本的实测形状）
+_EDIT_COUNT_KEYS = ("update", "updated", "count")
+
+
+def _edit_result(res: Any, part: Sequence[dict]) -> tuple[list[int], int]:
+    """解析批量写回响应 → (确认的 id 列表, 确认改动的条数)。
+
+    - id 数组：最常见，条数 = len(ids)；
+    - `{"update": N}`：只有条数。N 等于本次提交条数时 id 可以确定（整块都成功），
+      直接补全；对不上就**不猜**，id 留空、只回条数；
+    - 2xx 空 body：请求已被接受，按整块记账（与 id 数组语义一致）；
+    - 其它形状（字符串/数字/认不出的 dict）直接报错：静默返回空列表会让调用方
+      以为一条都没改。
+    """
+    if isinstance(res, list):
+        ids = [int(x) for x in res]
+        return ids, len(ids)
+    if res is None:
+        ids = [int(it["id"]) for it in part]
+        return ids, len(ids)
+    if isinstance(res, dict):
+        for key in _EDIT_COUNT_KEYS:
+            count = res.get(key)
+            if isinstance(count, int):
+                ids = [int(it["id"]) for it in part] if count == len(part) else []
+                return ids, count
+        raise ParaTranzError(0, f"批量写回响应缺少更新条数：{str(res)[:200]}", "/strings")
+    raise ParaTranzError(0, f"批量写回响应形状无法识别：{str(res)[:200]}", "/strings")
+
+
 class ParaTranzClient:
     def __init__(
         self,
@@ -376,18 +422,24 @@ class ParaTranzClient:
             raise ParaTranzError(404, "词条不存在（可能已删除）", f"/strings/{string_id}")
         return StringItem.model_validate(data)
 
-    def batch_edit_strings(self, items: Sequence[dict], *, chunk: int = BATCH_LIMIT) -> list[int]:
-        """批量写译文 / 改 stage。items 每项至少含 id，可含 translation/stage/context。"""
-        updated: list[int] = []
+    def batch_edit_strings(self, items: Sequence[dict], *, chunk: int = BATCH_LIMIT) -> BatchWrite:
+        """批量写译文 / 改 stage。items 每项至少含 id，可含 translation/stage/context。
+
+        返回值见 `BatchWrite`：id 明细与「平台报告的改动条数」分开给，
+        报表要报「实际改了多少」时用后者，别拿 `len()` 当条数。
+        """
+        ids: list[int] = []
+        reported = 0
         items = list(items)
         for i in range(0, len(items), chunk):
             part = items[i : i + chunk]
             res = self.request(
                 "PUT", "/projects/{projectId}/strings", json_body={"op": "edit", "items": part}
             )
-            if isinstance(res, list):
-                updated.extend(int(x) for x in res)
-        return updated
+            part_ids, part_reported = _edit_result(res, part)
+            ids.extend(part_ids)
+            reported += part_reported
+        return BatchWrite(ids, reported=reported)
 
     def create_strings(
         self, items: Sequence[dict], file_id: int, *, on_progress=None
@@ -435,7 +487,7 @@ class ParaTranzClient:
         """该文件下已存在的所有 key（用于导入前算差集）。"""
         return {x.key for x in self.get_file_strings(file_id)}
 
-    def set_stage(self, string_ids: Iterable[int], stage: Stage) -> list[int]:
+    def set_stage(self, string_ids: Iterable[int], stage: Stage) -> BatchWrite:
         return self.batch_edit_strings([{"id": int(i), "stage": int(stage)} for i in string_ids])
 
     def get_suggestions(self, string_id: int, *, scope: str = "self", rate: int = 70) -> list[dict]:

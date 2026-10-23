@@ -1222,10 +1222,12 @@ def main() -> int:
         check("原地修改默认不勾选",
               pick(wb_def.get("in_place") is False and wb_def.get("go_disabled") is False,
                    re.search(r'id="wb_inplace"[^>]*checked', app_js) is None))
+        # 备份路径按实现写：<state-dir>/writeback/<提取记录 id>/backup-<时间戳>/
+        # （曾经写成 `.ptz-backup/<时间戳>/`，用户按提示根本找不到备份）
         check("勾上原地修改 → 醒目警示（备份路径 + 免责）",
-              pick(wb_risk.get("display") != "none" and ".ptz-backup" in wb_html
+              pick(wb_risk.get("display") != "none" and "backup-" in wb_html
                    and "自行承担" in wb_html,
-                   ".ptz-backup" in app_js and "自行承担" in app_js))
+                   "backup-<时间戳>" in app_js and "自行承担" in app_js))
         check("勾上原地修改 → 提交禁用并 5 秒倒计时",
               pick(wb_risk.get("disabled") is True and "5s" in (wb_risk.get("text") or ""),
                    "WB_COUNTDOWN_SEC = 5" in app_js and "setInterval" in app_js),
@@ -1559,6 +1561,30 @@ def main() -> int:
         check("写回报告四个「未写入」分项齐全",
               all(k in app_js for k in ("unsupported", "skipped_no_original",
                                         "skipped_untracked", "details")))
+        check("「上传为新文件」有界面入口且已接线",
+              'id="x_upload"' in app_js and "/upload" in app_js
+              and "up_preview_btn" in app_js)
+        check("上传弹窗强制先预览（讲明格式假设）",
+              "本项目格式若不是 JSON" in app_js or "格式若不是 JSON" in app_js)
+
+        print("\n== 入参边界（审计低危）==")
+        check("limit 越界返回 422", c.get("/api/jobs?limit=0").status_code == 422
+              and c.get("/api/jobs?limit=-1").status_code == 422)
+        check("空 Host 被拒（白名单里没有空串）",
+              c.get("/api/health", headers={"Host": ""}).status_code == 403)
+        vbad = c.post("/api/jobs", json={})
+        check("422 与业务错误同形状",
+              vbad.status_code == 422 and set(vbad.json()) == {"error", "fields"},
+              str(list(vbad.json().keys())) if vbad.status_code == 422 else "")
+        check("保留参数名被拒",
+              c.post("/api/jobs", json={"tool": "translate",
+                                        "args": {"ctx": 1}}).status_code == 400)
+        check("设置值域被校验",
+              c.put("/api/settings", json={"writeback_min_stage": 99}).status_code == 422
+              and c.put("/api/settings", json={"project_id": -1}).status_code == 422)
+        up_bad = c.post("/api/extractions/none/upload",
+                        json={"filename": "x.txt", "dry_run": True})
+        check("上传只收 .json 文件名", up_bad.status_code == 400)
         h = c.get("/api/health").json()
         check("health 暴露 version", isinstance(h.get("version"), str) and h["version"],
               str(h.get("version")))

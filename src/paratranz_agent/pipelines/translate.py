@@ -14,13 +14,14 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Sequence
 
+from ..client import ParaTranzClient
 from ..config import AgentConfig
+from ..filematch import matches_any
 from ..llm import BaseLLM, LLMError, LLMNotConfigured, build_messages
 from ..models import Stage, StringItem
 from ..qa import Severity, check_placeholders, run_qa
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..client import ParaTranzClient
     from ..store import Store
 
 SYSTEM_PROMPT = """你是一名资深游戏本地化译者，负责把英文游戏文本译成简体中文。
@@ -42,10 +43,18 @@ SYSTEM_PROMPT = """你是一名资深游戏本地化译者，负责把英文游�
 # 第 1 块已经写进平台，而调用方拿不到任何账。
 WRITE_CHUNK = 500
 
+# 单轮取材条数上限。`iter_strings` 到上限只是安静地 `return`，不告诉调用方
+# 「后面还有」—— 触到上限时把 truncated 写进 stats，否则报表会假装全处理完了。
+DEFAULT_MAX_ITEMS = 20000
+
 
 @dataclass
 class TranslateStats:
     fetched: int = 0
+    # 取材被 max_items 截断：本轮只处理前 max_items 条，项目里还有剩余。
+    # 缺这两个字段时「只翻了前 2 万条」会被报成「全翻完了」。
+    truncated: bool = False
+    max_items: int = 0
     tm_hit: int = 0
     llm_batches: int = 0
     llm_ok: int = 0
@@ -72,6 +81,8 @@ class TranslateStats:
     def as_dict(self) -> dict:
         return {
             "fetched": self.fetched,
+            "truncated": self.truncated,
+            "max_items": self.max_items,
             "tm_hit": self.tm_hit,
             "llm_batches": self.llm_batches,
             "llm_ok": self.llm_ok,
@@ -227,13 +238,22 @@ class TranslatePipeline:
         self,
         *,
         limit: int | None = None,
-        max_items: int = 20000,
+        max_items: int = DEFAULT_MAX_ITEMS,
         stats: "TranslateStats | None" = None,
     ) -> list[StringItem]:
+        """采集本轮要翻的词条。
+
+        取到的条数顶到 `max_items` 就把 `stats.truncated` 置位并留下告警：
+        `iter_strings` 到上限只是安静地停下，不记这一笔的话报表会声称
+        整个项目「已经全处理完了」（真实项目 2 万条以上就会撞上）。
+        """
         files = self.cfg.translate.files
         file_ids: list[int] | None = None
         if files:
-            file_ids = [f.id for f in self.client.list_files() if any(a in f.name for a in files)]
+            # 与回写共用同一条白名单语义（精确相等或以 `项/` 开头）。
+            # 子串匹配下 `files: ["a"]` 会选中所有含 a 的文件名。
+            file_ids = [f.id for f in self.client.list_files()
+                        if matches_any(f.name, files)]
             if not file_ids:
                 # 白名单配了但一个都没匹配到 —— 绝不能把空列表传给 iter_strings，
                 # 那里 `for fid in file or []` 会退化成"不传 file 参数"= 全项目翻译。
@@ -242,9 +262,11 @@ class TranslatePipeline:
                 return []
 
         out: list[StringItem] = []
+        taken = 0
         for s in self.client.iter_strings(
             file=file_ids, stage=Stage.UNTRANSLATED, max_items=max_items
         ):
+            taken += 1
             if len(s.original.strip()) < self.cfg.translate.min_length:
                 if stats is not None:
                     stats.skipped_short += 1
@@ -254,6 +276,13 @@ class TranslatePipeline:
             out.append(s)
             if limit and len(out) >= limit:
                 break
+        if stats is not None and max_items and taken >= max_items:
+            stats.truncated = True
+            stats.max_items = max_items
+            stats.warnings.append(
+                f"取材被上限截断：本轮只取前 {max_items} 条未翻译词条，项目里还有剩余；"
+                f"写回后这些词条不再是 stage=0，再跑一轮会接着处理"
+            )
         return out
 
     # ------------------------------------------------------------------ 翻译
@@ -437,9 +466,19 @@ class TranslatePipeline:
                     stats,
                 ) from exc
 
-            # 平台正常返回写入成功的 id 列表；非列表响应（2xx 但无 body）时
-            # batch_edit_strings 返回空列表 —— 请求已被接受，按整块记账。
-            ids = list(done) if done else [w["id"] for w in part]
+            # 平台回的 id 明细见 client.BatchWrite：id 数组、`{"update": N}`
+            # 与 2xx 空 body 都能落到确定的 id 上（整块都成功时按提交的 id 补全）。
+            # 补不全说明平台报告的条数和本块提交数对不上 —— 哪些落库无从判断，
+            # 整块按未写入对待（下一轮幂等重试），绝不能把没写的记成写了。
+            ids = list(done)
+            if not ids:
+                stats.failed += len(part)
+                stats.write_chunks_failed += 1
+                stats.warnings.append(
+                    f"写回结果无法确认：平台报告更新 {done.reported} 条，本块提交 {len(part)} 条，"
+                    f"整块按未写入处理（下一轮重试）"
+                )
+                continue
             targets_of = {w["id"]: w["translation"] for w in part}
             self.store.tm_add_many(
                 [
@@ -461,13 +500,14 @@ class TranslatePipeline:
         limit: int | None = None,
         dry_run: bool = False,
         sync_terms: bool = True,
+        max_items: int = DEFAULT_MAX_ITEMS,
     ) -> TranslateStats:
         stats = TranslateStats(dry_run=dry_run)
         if sync_terms:
             # 术语同步失败不该让翻译整轮不动：结果记进 stats，谁看报表谁发现。
             stats.terms_sync = self.sync_terms_from_platform(raise_on_error=False)
 
-        targets = self._collect(limit=limit, stats=stats)
+        targets = self._collect(limit=limit, max_items=max_items, stats=stats)
         stats.fetched = len(targets)
         if not targets:
             return stats

@@ -12,10 +12,19 @@ r"""JSON 路径族写回器：**手术式替换字符串字面量**，不重新�
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from .base import ApplyResult, WriteItem
 from .locator import LocatorError, parse_locator
+
+# 同一条译文被两条词条抢占同一段字面量时的原因文案。
+# 与 `line.py` 用完全同一句话：两族写回器对「谁被跳过了」必须给出同样好读的解释。
+OVERLAP_REASON = "与另一条译文的位置重叠，已跳过"
+
+# 递归下降扫描器爆栈时给用户的话。嵌套 900 层的文件（事件表套事件表、插件配置
+# 层层包 wrapper）真实存在，这种文件只能改用行号族提取器，JSON 路径族扫不动。
+NESTED_TOO_DEEP = "文件嵌套过深，扫描器无法处理（建议改用行号族提取器）"
 
 # 需要转义的 JSON 控制字符
 _CTRL = {chr(i): "\\u%04x" % i for i in range(0x20)}
@@ -184,6 +193,21 @@ def scan_strings(text: str) -> dict[tuple[Any, ...], tuple[int, int, str]]:
     return sc.spans
 
 
+@dataclass(frozen=True)
+class _Edit:
+    """一条待落地的替换。
+
+    `seq` 是条目在调用参数里的顺序 —— 只有它能让 `written` 按入参顺序回报
+    （重叠被挡掉的条目会从 `written` 里消失，位置不能靠追加顺序碰运气）。
+    """
+
+    seq: int
+    key: str
+    start: int
+    end: int
+    text: str
+
+
 def apply_json(
     content: str,
     items: Sequence[WriteItem],
@@ -205,9 +229,19 @@ def apply_json(
             res.errors.append((it.key, f"文件不是合法 JSON：{exc}"))
         res.content = content
         return res
+    except RecursionError:
+        # 递归下降扫描器受 Python 栈深限制（默认 1000 帧，一层嵌套吃两帧）。
+        # 这是**单文件**的病，不是整轮回写的病：放它穿透出去会把 pipeline 的
+        # 整轮循环炸掉，连已经写完的文件都没了报告。按「本文件一条都不写」处理。
+        for it in items:
+            res.errors.append((it.key, NESTED_TOO_DEEP))
+        res.content = content
+        return res
 
-    edits: list[tuple[int, int, str]] = []
-    for it in items:
+    edits: list[_Edit] = []
+    # 已经是目标译文的条目：不用改文件，但确实算写成功，最后一起按入参顺序回报
+    already: list[tuple[int, str]] = []
+    for seq, it in enumerate(items):
         try:
             parsed = parse_locator(it.key.split("::", 1)[-1])
         except LocatorError as exc:
@@ -220,7 +254,7 @@ def apply_json(
         start, end, current = span
         if current == it.translation:
             # 已经是目标状态：幂等，不重复改
-            res.written.append(it.key)
+            already.append((seq, it.key))
             continue
         # 提取器会把 original `strip()` 后上传（`generic-json` 的 `s = node.strip()`），
         # 所以文件里的字面量可能带首尾空白而平台记录没有。逐字比对会让这类词条
@@ -231,10 +265,14 @@ def apply_json(
             )
             continue
         # 只替换引号内的内容：start+1 跳过开引号，end-1 跳过闭引号
-        edits.append((start + 1, end - 1, json_escape(it.translation)))
-        res.written.append(it.key)
+        edits.append(
+            _Edit(seq=seq, key=it.key, start=start + 1, end=end - 1,
+                  text=json_escape(it.translation))
+        )
 
-    res.content = _splice(content, edits)
+    res.content, accepted = _splice(content, edits, res)
+    landed = already + [(e.seq, e.key) for e in accepted]
+    res.written = [key for _, key in sorted(landed)]
     return res
 
 
@@ -243,14 +281,35 @@ def _short(text: str, limit: int = 40) -> str:
     return t if len(t) <= limit else t[:limit] + "…"
 
 
-def _splice(content: str, edits: Sequence[tuple[int, int, str]]) -> str:
-    """按 (起, 止, 替换内容) 从后往前拼接；重叠的区间直接丢弃后一个。"""
-    out = content
-    last_start = len(content) + 1
-    for start, end, repl in sorted(edits, key=lambda e: e[0], reverse=True):
-        if end > last_start:
-            # 与已应用的更靠后的编辑重叠：理论上不该发生（路径互不相同）
+def _splice(
+    content: str, edits: list[_Edit], res: ApplyResult
+) -> tuple[str, list[_Edit]]:
+    """先按原坐标查重叠，再从后往前拼接；被重叠挡掉的那条记进 `res.errors`。
+
+    返回 `(新内容, 真正落地的替换)`。
+
+    **为什么必须查重叠**：同一个 key 在 entries.jsonl 里出现两次（合并导入、
+    手工改过记录都会发生）时，两条定位符指向**同一个字面量**，区间必然重叠。
+    早先这里遇到重叠直接 `continue` 扔掉后一条，可 `written` 在挑选阶段就记过了
+    —— 报告说「写入 2 条」实际只落地 1 条，正好违反本子系统的第一原则
+    （所有没写成的事实都必须出现在报告里）。现在与行号族 `line._splice` 完全一致：
+    只认先到的一条，另一条从 `written` 里摘掉并记 errors。
+
+    所有 `start`/`end` 都是**原始 content 的坐标**，所以从后往前拼一遍即可，
+    前面改动多长都不影响后面。
+    """
+    if not edits:
+        return content, []
+    accepted: list[_Edit] = []
+    cursor = 0  # 已接受区间的右端（原坐标）
+    for edit in sorted(edits, key=lambda e: (e.start, e.end)):
+        if edit.start < cursor:
+            res.errors.append((edit.key, OVERLAP_REASON))
             continue
-        out = out[:start] + repl + out[end:]
-        last_start = start
-    return out
+        accepted.append(edit)
+        cursor = edit.end
+
+    out = content
+    for edit in sorted(accepted, key=lambda e: e.start, reverse=True):
+        out = out[: edit.start] + edit.text + out[edit.end :]
+    return out, accepted

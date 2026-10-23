@@ -44,6 +44,9 @@ _DIGEST_TITLE = "[自动校对] 打回明细"
 # 台账帖最多列多少行明细，以及正文总长上限（平台会 400 掉超长 body 的概率未知）
 _DIGEST_MAX_ROWS = 200
 _DIGEST_MAX_CHARS = 20000
+# 单轮取材条数上限。`iter_strings` 到上限就 `return`，不会告诉调用方「后面还有」，
+# 所以触到上限时必须把「被截断」写进 stats 并在日志里说明（见 _collect / run）。
+DEFAULT_MAX_ITEMS = 20000
 
 
 def _clip(text: str, limit: int = QUOTE_CHARS) -> str:
@@ -108,6 +111,10 @@ REVIEW_SYSTEM = """你是一名严格的游戏本地化校对员。给定原文�
 @dataclass
 class ReviewStats:
     fetched: int = 0
+    # 取材被 max_items 截断：本轮只处理前 max_items 条，项目里还有剩余。
+    # 没有这两个字段时「只审了前 2 万条」会被报成「已经全审完」。
+    truncated: bool = False
+    max_items: int = 0
     qa_blocked: int = 0
     llm_blocked: int = 0
     passed: int = 0
@@ -129,6 +136,8 @@ class ReviewStats:
     def as_dict(self) -> dict:
         return {
             "fetched": self.fetched,
+            "truncated": self.truncated,
+            "max_items": self.max_items,
             "qa_blocked": self.qa_blocked,
             "llm_blocked": self.llm_blocked,
             "passed": self.passed,
@@ -173,7 +182,8 @@ class ReviewPipeline:
         task: int | None = None,
         limit: int | None = None,
         include_disputed: bool = False,
-        max_items: int = 20000,
+        max_items: int = DEFAULT_MAX_ITEMS,
+        stats: "ReviewStats | None" = None,
     ) -> list[StringItem]:
         """默认只校对「已翻译(1)」。
 
@@ -184,14 +194,22 @@ class ReviewPipeline:
         **空译文照收**：stage=1 却没有译文属于脏数据，交给 `run()` 按 empty 级问题
         处理（打回或重置）。以前在这里 `continue` 掉，等于让它既不被重译也不被审，
         永久卡死，还会把平台的 translated 计数抬成假的 100%。
+
+        取到的条数顶到 `max_items` 就把 `stats.truncated` 置位：`iter_strings`
+        到上限只是安静地 `return`，不记这一笔的话报表会声称「全审完了」。
         """
         stages = (Stage.TRANSLATED, Stage.DISPUTED) if include_disputed else (Stage.TRANSLATED,)
         out: list[StringItem] = []
         for st in stages:
+            taken = 0
             for s in self.client.iter_strings(task=task, stage=st, max_items=max_items):
+                taken += 1
                 out.append(s)
                 if limit and len(out) >= limit:
                     return out
+            if stats is not None and max_items and taken >= max_items:
+                stats.truncated = True
+                stats.max_items = max_items
         return out
 
     # ------------------------------------------------------------------ 二审
@@ -247,11 +265,23 @@ class ReviewPipeline:
         limit: int | None = None,
         dry_run: bool = False,
         include_disputed: bool = False,
+        max_items: int = DEFAULT_MAX_ITEMS,
     ) -> ReviewStats:
         cfg = self.cfg.review
         stats = ReviewStats(dry_run=dry_run)
-        targets = self._collect(task=task, limit=limit, include_disputed=include_disputed)
+        targets = self._collect(
+            task=task,
+            limit=limit,
+            include_disputed=include_disputed,
+            max_items=max_items,
+            stats=stats,
+        )
         stats.fetched = len(targets)
+        if stats.truncated:
+            self._log(
+                f"取材被上限截断：本轮只取前 {stats.max_items} 条，项目里还有剩余；"
+                f"写回后这些词条已离开当前 stage，再跑一轮会接着处理"
+            )
         if not targets:
             self._log("没有待校对的词条")
             return stats
@@ -396,22 +426,28 @@ class ReviewPipeline:
             stats.written = len(dispute_ids) + len(local_pass) + len(reset_ids)
             return stats
 
-        written_ids: list[int] = []
+        def _write(ids: list[int], stage: Stage, action: str, label: str) -> None:
+            """写一批 stage，并按**平台报告改动的条数**累加 stats.written。
+
+            不能用 `len(res)`：平台有只回 `{"update": N}` 的形状，那时 id 列表
+            为空而 stage 已经改完，报表会写成「写回 0 条」。
+            """
+            res = self.client.set_stage(ids, stage)
+            stats.written += res.reported
+            for sid in ids:
+                self.store.ledger_mark(self.name, str(sid), action)
+            if res.reported > len(res):
+                # 条数对不上 id 明细时留痕：数字是真的，但具体改了哪些查不到
+                self._log(f"{label}：平台报告更新 {res.reported} 条，未返回 id 明细")
+
         if dispute_ids:
-            written_ids += self.client.set_stage(dispute_ids, Stage(cfg.fail_stage))
-            for sid in dispute_ids:
-                self.store.ledger_mark(self.name, str(sid), "dispute")
+            _write(dispute_ids, Stage(cfg.fail_stage), "dispute", "打回")
         if reset_ids:
-            written_ids += self.client.set_stage(reset_ids, Stage.UNTRANSLATED)
-            for sid in reset_ids:
-                self.store.ledger_mark(self.name, str(sid), "reset_empty")
+            _write(reset_ids, Stage.UNTRANSLATED, "reset_empty", "重置空译文")
         if local_pass:
-            written_ids += self.client.set_stage(local_pass, Stage(cfg.pass_stage))
-            for sid in local_pass:
-                self.store.ledger_mark(self.name, str(sid), "pass")
+            _write(local_pass, Stage(cfg.pass_stage), "pass", "通过")
         self.store.ledger_commit()
         # 用平台实际更新的条数，而不是"我们打算改多少"
-        stats.written = len(written_ids)
         self._log(f"stage 写回完成：{stats.written} 条")
 
         # 4) 打回明细发到平台讨论区

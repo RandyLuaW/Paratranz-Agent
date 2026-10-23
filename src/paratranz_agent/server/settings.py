@@ -197,7 +197,10 @@ class RuntimeSettings(BaseModel):
     # ---- Agent 行为 ----
     agent_max_steps: int = 8
     agent_tool_timeout: int = 120
-    system_prompt_prefix: str = ""
+    # 注意：没有 system_prompt_prefix。曾经有过一个同名字段，但它既不进
+    # `prompt_for()` 也不进 `to_agent_config()`，界面填了完全没效果 ——
+    # 全局前置提示词的唯一入口是 `prompts.prefix`。死配置比没配置更坑，
+    # 所以直接删掉而不是留着"兼容"。
 
     # ---- 成本 ----
     budget: dict[str, Any] = Field(default_factory=dict)

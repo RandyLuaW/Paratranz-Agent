@@ -66,6 +66,45 @@ def src_hash(text: str) -> str:
     return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()
 
 
+# --------------------------------------------------------------- schema 迁移
+# 每张表「后来加的列」。迁移只补**缺的那些**：
+# `CREATE TABLE IF NOT EXISTS` 对已存在的表一个字都不改，所以给老库加列只能靠
+# `ALTER TABLE ADD COLUMN`；而重复 ALTER 会直接抛 duplicate column name，
+# 必须先读 `PRAGMA table_info` 比对。这里的声明要与 SCHEMA 里的列定义同口径。
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "term": {
+        "pos": "TEXT",
+        "note": "TEXT",
+        "variants": "TEXT NOT NULL DEFAULT '[]'",
+        "source": "TEXT NOT NULL DEFAULT 'platform'",
+        "status": "TEXT NOT NULL DEFAULT 'active'",
+        "updated_at": "REAL NOT NULL DEFAULT 0",
+    },
+}
+
+
+def _migrate_to_v1(conn: sqlite3.Connection) -> None:
+    """v1：给术语表补齐可选列。
+
+    老库（v0）只有 `term` / `translation` 两列，而 `term_upsert` 会显式写 pos /
+    variants / status 等列 —— 列不存在时整条流水线以
+    `table term has no column named pos` 失败，用户升级后一次都跑不起来。
+    """
+    for table, columns in _ADDED_COLUMNS.items():
+        have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns.items():
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
+# 迁移步骤：下标 + 1 就是它升到的版本号，严格按顺序执行，只能往后追加。
+MIGRATIONS = (_migrate_to_v1,)
+
+# 当前 schema 版本，记在库文件的 `PRAGMA user_version` 里（不用 meta 表：版本号
+# 必须在建表之前就读得到）。由迁移表长度推出，避免常数和步骤数各写一遍而走样。
+SCHEMA_VERSION = len(MIGRATIONS)
+
+
 def _bigrams(text: str) -> set[str]:
     t = "".join(ch for ch in text.lower() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
     if len(t) < 2:
@@ -125,7 +164,26 @@ class Store:
         self.db = open_sqlite(self.path)
         with self._lock:
             self.db.executescript(SCHEMA)
+            self._migrate()
             self.db.commit()
+
+    def _migrate(self) -> None:
+        """按 `PRAGMA user_version` 把库逐级升到 `len(MIGRATIONS)`。
+
+        没有这一层时 `CREATE TABLE IF NOT EXISTS` 会把老库原样放过：后来给 term
+        加的列永远不会补上，升级后的第一轮就是 `table term has no column named pos`。
+        """
+        version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
+        if version > len(MIGRATIONS):
+            # 旧程序打开新库：硬报错，别让它在缺表/缺列的库上继续写
+            raise RuntimeError(
+                f"本地状态库版本 {version} 高于本程序支持的 {len(MIGRATIONS)}（{self.path}），"
+                f"请升级 paratranz-agent 后重试"
+            )
+        for target in range(version, len(MIGRATIONS)):
+            MIGRATIONS[target](self.db)
+            # PRAGMA 不支持参数绑定；这里的值来自 range，不是外部输入
+            self.db.execute(f"PRAGMA user_version = {target + 1}")
 
     def close(self) -> None:
         with self._lock:
@@ -272,10 +330,15 @@ class Store:
         if not pool:
             return []
         joined = "\n".join(texts)
+        # 与确定性校验（`qa.check_terms`）共用同一套命中口径：ASCII 整词、中文子串。
+        # 口径不一致会让原文里压根没有的术语被塞进批次上下文 —— 白占 token，
+        # 还会诱导模型把无关术语硬套进去。
+        from .qa import term_hit
+
         hits: list[dict] = []
         for term, meta in pool.items():
             variants = [term, *(meta.get("variants") or [])]
-            if not any(v and v in joined for v in variants):
+            if not any(term_hit(joined, v) for v in variants if v):
                 continue
             row = {"term": term, "translation": meta["translation"]}
             if with_pos:

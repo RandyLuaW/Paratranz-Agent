@@ -2,10 +2,24 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from ..deps import Deps
-from ..params import as_int
+from ..params import LIST_LIMIT, PAGE_LIMIT, as_int
+
+
+
+def _redact_log(ctx, text: str) -> str:
+    """把提取器日志里的已知密钥与密钥形态串抹掉再回给前端。
+
+    已知密钥 = 当前配置里的平台 token / 旧的 llm_key / 所有 provider 的 api_key
+    （与日志脱敏用的是同一批，见 `AppContext` 里 LogStore 的构造）。
+    """
+    from ..redact import redact
+
+    s = ctx.settings
+    secrets = [s.token, s.llm_key] + [p.api_key for p in s.providers if p.api_key]
+    return redact(text or "", secrets)
 
 
 def register(app: FastAPI, d: Deps) -> None:
@@ -145,13 +159,14 @@ def register(app: FastAPI, d: Deps) -> None:
         return {"ok": True, "job": job.as_dict()}
 
     @app.get("/api/extractions")
-    def list_extractions(limit: int = 50) -> dict:
+    def list_extractions(limit: int = LIST_LIMIT) -> dict:
         from ..extraction import list_jobs
 
         return {"rows": list_jobs(ctx.state_dir, limit=limit)}
 
     @app.get("/api/extractions/{jid}")
-    def get_extraction(jid: str, limit: int = 100, offset: int = 0) -> dict:
+    def get_extraction(jid: str, limit: int = PAGE_LIMIT,
+                       offset: int = Query(0, ge=0, description="跳过条数")) -> dict:
         from ..extraction import ExtractionError, get_job, job_log, load_entries
 
         try:
@@ -166,7 +181,10 @@ def register(app: FastAPI, d: Deps) -> None:
             "entries": entries,
             # 总条数取自 meta（提取完成时就写好了），不必为此再读一遍文件
             "total": int(meta.get("entries") or 0) or len(entries),
-            "log": job_log(ctx.state_dir, jid),
+            # 日志来自提取器子进程的 stdout，是本工具唯一「不经过 LogStore」的
+            # 文本通道。子进程环境变量里已经剔掉凭据（见 extraction/runner.py），
+            # 这里再过一遍脱敏，挡的是「提取器自己读文件读到了密钥」那种情况。
+            "log": _redact_log(ctx, job_log(ctx.state_dir, jid)),
         }
 
     @app.post("/api/extractions/{jid}/validate")
@@ -272,6 +290,68 @@ def register(app: FastAPI, d: Deps) -> None:
             "report": report,
             "filename": filename,
             "file_id": file_id_int,
+        }
+
+    @app.post("/api/extractions/{jid}/upload")
+    def upload_extraction(jid: str, body: dict) -> dict:
+        """把提取结果上传成一个**新文件**（`POST /files`）。
+
+        与 `/import` 的区别：import 是往已有文件里补 key（逐条建词条，几千条要跑很久），
+        本接口新建文件、由平台自己解析建词条（一次请求）。
+
+        **必须先预览**：我们产出的是 `{key: original}` 的 JSON 对象，只有 `json`
+        格式的项目能直接吃；twee / gettext 项目传上去会「成功但零词条」。
+        所以 `dry_run` 不只是友好，它是这个功能的正确用法 —— 不预览直接传，
+        等于把一个格式假设赌在平台上。
+        """
+        from ..extraction import (
+            ExtractionError,
+            export_upload_json,
+            load_entries,
+            normalize,
+        )
+
+        body = body or {}
+        filename = str(body.get("filename") or "").strip() or "extract.json"
+        if not filename.lower().endswith(".json"):
+            raise HTTPException(400, "上传文件名必须以 .json 结尾（平台按扩展名选解析器）")
+        target_path = str(body.get("path") or "").strip()
+
+        if not body.get("dry_run"):
+            ctx.guard()
+            job = runner.submit(
+                "extraction_upload",
+                {"extraction_id": jid, "filename": filename, "path": target_path,
+                 "force": bool(body.get("force"))},
+            )
+            ctx.logs.add(
+                "上传新文件 " + filename + "（提取记录 " + jid + "，job " + job.id + "）",
+                source="extract",
+            )
+            return {"ok": True, "job": job.as_dict(), "filename": filename}
+
+        try:
+            entries = load_entries(ctx.state_dir, jid)
+        except ExtractionError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        merged, merge_stats = normalize(entries)
+        content = export_upload_json(merged)
+        preview = content.decode("utf-8", errors="replace").splitlines()[:40]
+        return {
+            "ok": True,
+            "dry_run": True,
+            "filename": filename,
+            "path": target_path,
+            "count": len(merged),
+            "bytes": len(content),
+            "merge": merge_stats,
+            "preview": preview,
+            # 说明「这份内容为什么可能不适用于本项目」——别让用户以为一定成功
+            "note": "平台按项目格式解析上传内容。本项目格式若不是 JSON，"
+                    "上传后可能建不出词条；确认预览无误再上传。",
+            "note_en": "The platform parses uploads using the project format. If this "
+                       "project is not JSON, the upload may create no strings; "
+                       "check the preview before uploading.",
         }
 
     @app.post("/api/extract/analyze")

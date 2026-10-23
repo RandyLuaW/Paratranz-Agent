@@ -62,6 +62,7 @@ from .transform import (
     MAX_ORIGINAL_LEN,
     PLACEHOLDER_RE,
     export_paratranz,
+    export_upload_json,
     normalize,
     validate,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "check_game_dir",
     "check_id",
     "export_paratranz",
+    "export_upload_json",
     "get_extractor",
     "get_job",
     "install_extractor",

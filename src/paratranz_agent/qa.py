@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import IntEnum
+from functools import lru_cache
 
 
 class Severity(IntEnum):
@@ -61,7 +62,14 @@ GENERIC_TOKENS = re.compile(
     # 标签内**不允许引号**：`<b>`、`<color=red>` 要保护，
     # 但 Twee/SugarCube 的 `<link "Back">` 里引号内是可译文本，不能整体当占位符
     r"\{\{?[^{}]*\}?\}|\$\{[^}]*\}|%[\d$]*[sdfioxX%]|%\{\w+\}"
-    r"|<[^<>\"']{1,20}>|\[\[[^\]]+\]\]"
+    r"|<[^<>\"']{1,20}>"
+    # `[[…]]` 必须排在单层方括号之前：正则按「最左 + 分支先后」匹配，
+    # 顺序反了会把 `[[显示文本|Passage]]` 拆成两个单层标签，译文一改动就误报。
+    r"|\[\[[^\]]+\]\]"
+    # 单层方括号标签（Unity 富文本 / Yarn / Ink 的 `[wave]`、`[/wave]`）：
+    # 注释里一直写着要保护 `[tag]`，但正则只写了 `[[…]]`，于是译文丢了标签也不报。
+    # 不许跨行：真正的标签不会断行，允许换行只会把正文当成标签吞掉。
+    r"|\[[^\[\]\n]{1,40}\]"
 )
 # SugarCube/Twee 的变量与宏名：可译文本之外必须原样保留。
 # 三个坑都在真实项目里踩到了：
@@ -235,14 +243,47 @@ def check_length(src: str, dst: str, *, limit: float = 3.5) -> list[Issue]:
     return issues
 
 
+@lru_cache(maxsize=4096)
+def _ascii_term_re(variant: str) -> re.Pattern[str]:
+    """ASCII 术语的「整词」正则（大小写不敏感）。
+
+    边界**只按 ASCII 字母/数字/下划线**判定，不用 `\\b`：Python 的 `\\b` 认
+    Unicode 词字符，`用he` 这种中文紧邻的写法会被判成「没有边界」而漏报，
+    而术语表要的是「这两侧不能紧贴英文字母」，与中文相邻恰恰该命中。
+
+    长度 ≤3 的短术语（`he` / `art` / `a`）也必须走这里：子串匹配下
+    `Start` 里的 `art`、`The` 里的 `he` 会让一条原文刷出好几条 term_violation，
+    WARN 噪音直接淹没真正的问题。
+    """
+    return re.compile(rf"(?<![A-Za-z0-9_]){re.escape(variant)}(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
+def term_hit(text: str, variant: str) -> bool:
+    """术语是否出现在 `text` 里：ASCII 走整词，中文走子串。
+
+    **翻译侧的术语筛选也用它**（`store.glossary_for`）。两处口径必须一致：
+    校验说"没命中"、筛 prompt 说"命中"，会让原文里压根没有的术语被塞进
+    批次上下文，白占 token 还干扰模型。
+    """
+    if not variant:
+        return False
+    if not variant.isascii():
+        # 中文（含中文的混合术语）没有词的概念，保持子串匹配
+        return variant in text
+    return _ascii_term_re(variant).search(text) is not None
+
+
 def check_terms(src: str, dst: str, terms: dict[str, dict]) -> list[Issue]:
-    """术语一致性：原文出现术语时，译文必须使用术语表指定译法。"""
+    """术语一致性：原文出现术语时，译文必须使用术语表指定译法。
+
+    命中判定见 `_ascii_term_re`：英文按整词、中文按子串。
+    """
     issues: list[Issue] = []
     if not terms:
         return issues
     for term, meta in terms.items():
         variants = [term, *(meta.get("variants") or [])]
-        hit = any(v and v in src for v in variants)
+        hit = any(v and term_hit(src, v) for v in variants)
         if not hit:
             continue
         want = meta.get("translation") or ""

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from ..deps import Deps
-from ..params import as_float
+from ..params import LOG_LIMIT, PAGE_LIMIT, as_float
+from ..settings import join_ref
 
 
 def register(app: FastAPI, d: Deps) -> None:
@@ -17,16 +18,20 @@ def register(app: FastAPI, d: Deps) -> None:
     )
 
     @app.get("/api/usage/summary")
-    def usage_summary(days: int = 7) -> dict:
+    def usage_summary(days: int = Query(7, ge=1, le=365)) -> dict:
         data = ctx.usage.summary(days=days)
         s = store.load()
         data["budget"] = ctx.budget_cfg.as_dict()
         data["budget_events"] = ctx.usage.budget_events(20)
-        data["current_model"] = s.llm_model
+        # 当前模型要按「任务路由 → 默认」实际解析一遍取。
+        # 原来读的是 `s.llm_model`（旧单模型字段的默认值 gpt-4o-mini），
+        # 配了 p1::gpt-4o 之后这里仍显示 gpt-4o-mini，与真实调用不符。
+        got = s.resolve_for("")
+        data["current_model"] = join_ref(got[0].id, got[1].id) if got else "未配置"
         return data
 
     @app.get("/api/usage/recent")
-    def usage_recent(limit: int = 100) -> dict:
+    def usage_recent(limit: int = PAGE_LIMIT) -> dict:
         return {"rows": ctx.usage.recent(limit)}
 
     @app.get("/api/usage/pricing")
@@ -54,7 +59,7 @@ def register(app: FastAPI, d: Deps) -> None:
 
     @app.get("/api/logs")
     def query_logs(
-        level: str = "", keyword: str = "", job_id: str = "", limit: int = 300
+        level: str = "", keyword: str = "", job_id: str = "", limit: int = LOG_LIMIT
     ) -> dict:
         rows = ctx.logs.query(
             level=level or None, keyword=keyword, job_id=job_id, limit=limit

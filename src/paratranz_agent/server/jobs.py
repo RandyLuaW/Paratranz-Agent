@@ -20,6 +20,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+# 单个任务最多保留多少条日志、整个 runner 最多记住多少个任务。
+# `_order` 原本就有 maxlen，但 `jobs` 字典没有 —— deque 从左边溢出时没人删字典里的
+# 对应条目，于是「最近 200 个任务」的列表和「全部任务」的字典越走越远。
+MAX_JOB_LOGS = 500
+MAX_JOBS = 200
+
 # 当前正在执行的任务（job_id, tool）。用量统计靠它把成本归到具体任务上。
 current_job: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
     "ptz_current_job", default=("", "")
@@ -35,7 +41,9 @@ class Job:
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
-    logs: list[dict[str, Any]] = field(default_factory=list)
+    # 日志只用来看最近发生了什么，给个上限：长跑任务（全量校对 9000 条）
+    # 每个 job 挂几千条 dict，字典又没有淘汰机制，内存只会一直涨。
+    logs: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=MAX_JOB_LOGS))
     result: dict[str, Any] | None = None
     error: str | None = None
     origin: str = "webui"  # webui | agent | cli
@@ -59,7 +67,7 @@ class Job:
             ),
         }
         if with_logs:
-            d["logs"] = self.logs[-200:]
+            d["logs"] = list(self.logs)[-200:]
         return d
 
 
@@ -116,7 +124,7 @@ class JobRunner:
         self.registry = registry
         self.sink = sink  # LogStore：任务日志同时进日志页与磁盘
         self.jobs: dict[str, Job] = {}
-        self._order: deque[str] = deque(maxlen=200)
+        self._order: deque[str] = deque(maxlen=MAX_JOBS)
         self._queue: queue.Queue[str] = queue.Queue()
         self._lock = threading.Lock()
         self._cancel: set[str] = set()
@@ -129,6 +137,11 @@ class JobRunner:
             raise KeyError(f"未知工具: {tool}")
         job = Job(id=uuid.uuid4().hex[:12], tool=tool, args=args or {}, origin=origin)
         with self._lock:
+            # deque 从左边溢出的条目要同步从字典里删掉，否则内存无上限增长
+            if len(self._order) >= MAX_JOBS:
+                dropped = self._order[0]
+                self.jobs.pop(dropped, None)
+                self._cancel.discard(dropped)
             self.jobs[job.id] = job
             self._order.append(job.id)
         self._queue.put(job.id)

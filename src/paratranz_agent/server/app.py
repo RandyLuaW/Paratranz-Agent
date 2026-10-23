@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -29,7 +30,9 @@ from .tools import AppContext, build_registry
 
 WEBUI_DIR = Path(__file__).parent / "webui"
 
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", ""}
+# 本机访问白名单。**不要放空串**：那等于给「没写 Host 的裸请求」开一个恒真的口子，
+# 白名单就形同虚设了。浏览器总会带 Host，所以去掉它不影响任何正常用法。
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
 def _host_only(raw: str) -> str:
@@ -123,6 +126,28 @@ def create_app(
 
     if WEBUI_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(WEBUI_DIR)), name="static")
+
+    @app.exception_handler(RequestValidationError)
+    async def bad_request(_: Request, exc: RequestValidationError):  # pragma: no cover
+        """把 FastAPI 的 422 压成和业务错误同一种形状。
+
+        默认响应是 `{"detail": [{"loc": [...], "msg": ...}]}`，而业务错误一律
+        `{"error": "..."}`。前端写的是 `data.error || data.detail`，于是 422 时
+        `detail` 是个**数组**，toast 里会渲染成 `[object Object]`；脚本调用方
+        也得写两套解析。统一成 `{"error", "fields"}`，只改一处。
+        """
+        from .redact import redact
+
+        fields = []
+        for err in exc.errors():
+            loc = ".".join(str(x) for x in err.get("loc", ()) if x != "body")
+            fields.append(f"{loc or 'body'}: {err.get('msg', '')}")
+        secrets = [store.load().token, store.load().llm_key]
+        return JSONResponse(
+            {"error": redact("请求参数不合法：" + "；".join(fields), secrets),
+             "fields": fields},
+            status_code=422,
+        )
 
     @app.exception_handler(HTTPException)
     async def http_exc(_: Request, exc: HTTPException):  # pragma: no cover

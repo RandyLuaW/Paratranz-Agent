@@ -30,10 +30,12 @@ import hashlib
 import json
 import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from ..filematch import matches_any
 from ..server import extraction
 from .apply import apply_items, family_of_key
 from .base import WriteItem, split_key
@@ -51,6 +53,13 @@ MAX_DETAILS = 50
 
 # 每复制多少个文件报一次进度（整包镜像可能是几万个文件）
 COPY_LOG_EVERY = 500
+
+# 每个 job 只保留最近几份备份。一次原地回写就是一份完整还原点，只增不减会把
+# state 目录一路涨到几个 G（用户根本不会去清那个目录）。
+BACKUP_KEEP = 5
+
+# key 里的文件路径越界时的原因文案
+BAD_REL_REASON = "key 里的文件路径不合法（绝对路径或含 ..）"
 
 
 class WritebackError(RuntimeError):
@@ -75,6 +84,7 @@ class WritebackReport:
     skipped_empty: int = 0           # 到了门槛但译文为空
     skipped_no_original: int = 0     # 平台没记原文，无法校验位置（一律不写）
     skipped_untracked: int = 0       # 提取记录有、平台上没这个 key
+    files_unmatched: int = 0         # entries 里有、但被 only_files 全部挡掉的相对路径数（去重）
     files: int = 0                   # 实际产生改动的文件数
     copied: int = 0                  # 镜像模式下原样复制过去的文件数
     written: int = 0
@@ -102,6 +112,7 @@ class WritebackReport:
             "skipped_empty": self.skipped_empty,
             "skipped_no_original": self.skipped_no_original,
             "skipped_untracked": self.skipped_untracked,
+            "files_unmatched": self.files_unmatched,
             "files": self.files,
             "copied": self.copied,
             "written": self.written,
@@ -228,7 +239,14 @@ def run_writeback(
     )
 
     by_file: dict[str, list[WriteItem]] = {}
-    wanted = [a for a in (only_files or []) if a]
+    # 白名单先归一化：反斜杠统一成斜杠、去掉首尾斜杠，否则 `--only data\` 与
+    # `--only data/` 会判成两回事，而用户在 Windows 上两种都会写
+    wanted: list[str] = []
+    for raw in only_files or []:
+        a = raw.replace("\\", "/").strip().strip("/")
+        if a and a not in wanted:
+            wanted.append(a)
+    blocked: set[str] = set()
     for e in entries:
         key = str(e.get("key") or "")
         if not key:
@@ -238,15 +256,32 @@ def run_writeback(
             rep.unsupported += 1
             rep.add_detail("unsupported", key, "key 里没有文件相对路径")
             continue
-        if wanted and not any(a in rel for a in wanted):
+        if not _safe_rel(rel):
+            # 畸形 key（`../outside.json::k`、`C:/x.json::k`）绝不能拿去拼路径：
+            # patch 模式下 `target_root / rel` 会直接写到输出目录之外
+            rep.unsupported += 1
+            rep.add_detail("unsupported", key, BAD_REL_REASON)
+            continue
+        if wanted and not matches_any(rel, wanted):
+            blocked.add(rel)
             continue
         item = pulled.get(key)
         if item is None:
             rep.skipped_untracked += 1
             continue
         by_file.setdefault(rel, []).append(item)
+    rep.files_unmatched = len(blocked)
 
     if not by_file:
+        if wanted:
+            # 白名单配了却一条都没写：必须说清楚是哪一步挡的，否则「筛错了文件」
+            # 和「平台没译文」在日志里长得一模一样，用户会以为回写已经生效
+            say(
+                f"only_files 没有匹配任何文件（筛选条件 {wanted} 挡掉了 "
+                f"{rep.files_unmatched} 个相对路径）"
+                if rep.files_unmatched
+                else f"only_files 命中的文件都没有可回写的译文（筛选条件 {wanted}）"
+            )
         say("没有可回写的词条：平台上找不到这些 key 的确认译文")
         return rep
 
@@ -256,9 +291,15 @@ def run_writeback(
     if in_place:
         # 一次运行只算一次备份目录：按文件调用会散落到不同时间戳目录，
         # manifest 就找不到自己那批备份了（曾在这里踩过）
-        backup_dir = _backup_root(state_dir, job_id)
-        rep.backup_dir = str(backup_dir)
-        say(f"⚠ 原地写入：改动前会备份到 {backup_dir}")
+        if dry_run:
+            # 预览不落盘，也就不会创建备份目录 —— 这时把 `backup_dir` 填上
+            # 会让报告/CLI 声称"已备份到某处"，而那个目录根本不存在。
+            # 报告里的数字与路径必须是事实，所以预览时留空并说明。
+            say("⚠ 原地写入（预览）：不会落盘，也不会创建备份目录")
+        else:
+            backup_dir = _backup_root(state_dir, job_id)
+            rep.backup_dir = str(backup_dir)
+            say(f"⚠ 原地写入：改动前会备份到 {backup_dir}")
     else:
         _check_out_dir(gdir, target_root)
         if mode == "mirror":
@@ -404,6 +445,26 @@ def _norm_rel(rel: str) -> str:
     return rel.replace("\\", "/").strip("/").casefold()
 
 
+def _safe_rel(rel: str) -> bool:
+    """key 里的文件相对路径能不能安全地拼到目录下面（game_dir / 输出目录 / 备份目录）。
+
+    拒绝四类写法：
+    - 空串 —— 没有相对路径就无从定位；
+    - 绝对路径（`/x.json`、`\\\\host\\share\\x.json`）—— 拼上去会丢掉前缀；
+    - 任何 `..` 路径段 —— `target_root / "../outside.json"` 直接跳出目录树，
+      patch 模式下就是「key 指向哪儿就往哪儿写」，能读写游戏目录之外的任意文件；
+    - 含 `:` 的路径 —— Windows 盘符（`C:/x.json`，`C:x.json` 是相对盘符的写法，
+      同样会跑出目录）与 NTFS 数据流（`a.json:ads`，写它等于往文件里插一段隐藏流）。
+
+    只认路径段等于 `..`，`data/..x.json` 这种正常文件名照常通过。
+    """
+    if not rel or ":" in rel:
+        return False
+    if rel[0] in ("/", "\\"):
+        return False
+    return all(part != ".." for part in rel.replace("\\", "/").split("/"))
+
+
 def _resolve_out(gdir: Path, out_dir: str | Path, in_place: bool) -> Path:
     if in_place:
         return gdir
@@ -440,8 +501,35 @@ def _safe(name: str) -> str:
 
 
 def _backup_root(state_dir: Path, job_id: str) -> Path:
-    # 必须落在 state 目录：放进游戏目录会被下次提取的 glob 再扫一遍
-    return state_dir / "writeback" / _safe(job_id) / time.strftime("backup-%Y%m%d-%H%M%S")
+    """本次回写要用的备份目录（只算路径，不建目录）。
+
+    必须落在 state 目录：放进游戏目录会被下次提取的 glob 再扫一遍。
+    """
+    base = state_dir / "writeback" / _safe(job_id)
+    # 秒级时间戳不够：同一秒里跑两轮回写（脚本连着跑、或前端连点两次）会撞到
+    # 同一个目录名，第二轮的备份写进第一轮的目录，还原点就退化成「第一次 run
+    # 之后的状态」了。加短随机后缀消歧，时间戳前缀留着方便人眼看是哪一轮。
+    name = f"backup-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    _prune_backups(base, current=name)
+    return base / name
+
+
+def _prune_backups(base: Path, *, current: str) -> None:
+    """只保留最近 `BACKUP_KEEP` 份备份（含本次这一份）。
+
+    目录名以时间戳开头，按名字倒序排就是时间倒序。清理失败一律忽略：
+    多留一份备份只是占点空间，让整轮回写因为清理失败而失败不可接受。
+    """
+    try:
+        names = {p.name for p in base.iterdir() if p.is_dir() and p.name.startswith("backup-")}
+    except OSError:
+        return  # 目录还不存在：这是第一次回写
+    names.add(current)
+    for name in sorted(names, reverse=True)[BACKUP_KEEP:]:
+        try:
+            shutil.rmtree(base / name)
+        except OSError:
+            continue
 
 
 def _write_backup(backup_dir: Path, rel: str, text: str, encoding: str = "utf-8") -> Path:

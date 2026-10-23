@@ -171,7 +171,7 @@ class ExtensionStore:
         if dest.exists():
             raise ValueError(f"插件已存在：{src.name}")
         shutil.copytree(src, dest)
-        return self.plugins()[0] if False else next(
+        return next(
             (p for p in self.plugins() if p.id == src.name), None
         ) or Extension(kind="plugin", id=src.name)
 
@@ -208,7 +208,8 @@ class ExtensionStore:
                     kind="skill",
                     id=d.name,
                     name=str(meta.get("name") or d.name),
-                    desc=str(meta.get("description") or body.strip().splitlines()[0] if body.strip() else ""),
+                    desc=str(meta.get("description")
+                             or (body.strip().splitlines()[0] if body.strip() else "")),
                     version=str(meta.get("version") or ""),
                     author=str(meta.get("author") or ""),
                     enabled=not (d / ".disabled").exists(),

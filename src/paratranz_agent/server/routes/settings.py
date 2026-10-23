@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import FastAPI, HTTPException
-from pydantic import create_model
+from pydantic import Field, create_model
 
 from ...client import ParaTranzError
 from ...pipelines.glossary import PROPOSE_SYSTEM
@@ -19,6 +21,33 @@ from ..settings import PROMPT_TASKS, RuntimeSettings, TASK_LABELS, TASK_LABELS_E
 # 不走「打补丁」这条路，所以补丁模型里排除它们。
 _PATCH_EXCLUDE = {"providers", "routing", "prompts", "budget", "pricing_overrides"}
 
+# 值域约束**只加在补丁模型上**，不加在 `RuntimeSettings` 上：
+# 落盘校验会对老配置做一次体检，用户库里存过一个越界值（比如早期版本写进去的
+# `writeback_min_stage=99`）就会连「打开设置页」都失败。补丁是「正在写入的新值」，
+# 才是该拦的地方。
+_PATCH_CONSTRAINTS: dict[str, tuple] = {
+    # 项目编号：0 = 未配置
+    "project_id": (int | None, Field(default=None, ge=0)),
+    # 平台限流按用户算，超过 480 必被平台拒；留点余量给别处并发
+    "rate_limit_per_min": (int | None, Field(default=None, ge=1, le=480)),
+    "batch_size": (int | None, Field(default=None, ge=1, le=200)),
+    "max_strings_per_task": (int | None, Field(default=None, ge=1)),
+    "per_run_limit": (int | None, Field(default=None, ge=1)),
+    "llm_concurrency": (int | None, Field(default=None, ge=1, le=64)),
+    "llm_max_retries": (int | None, Field(default=None, ge=0, le=10)),
+    "agent_max_steps": (int | None, Field(default=None, ge=1, le=50)),
+    "agent_tool_timeout": (int | None, Field(default=None, ge=5, le=3600)),
+    "llm_max_tokens": (int | None, Field(default=None, ge=0)),
+    "llm_timeout": (float | None, Field(default=None, gt=0)),
+    "llm_temperature": (float | None, Field(default=None, ge=0, le=2)),
+    # 回写门槛只有 1/3/5 三个合法值（与回写路由、报告文案共用同一套语义）
+    "writeback_min_stage": (Literal[1, 3, 5] | None, None),
+    # 校对打回的严重度档位（qa.Severity 的三个名字）
+    "review_block_on": (Literal["error", "warn", "info"] | None, None),
+    "review_pass_stage": (Literal[3, 5] | None, None),
+    "writeback_mode": (Literal["mirror", "patch"] | None, None),
+}
+
 # `PUT /api/settings` 的补丁模型：字段表由 `RuntimeSettings` **自动派生**。
 # 手抄一份的代价已经付过 —— 新增 `writeback_*` 三项时忘了同步，
 # pydantic 把未知字段静默丢掉：PUT 返回 200，配置却没落盘，界面从此对不上。
@@ -27,7 +56,7 @@ _PATCH_EXCLUDE = {"providers", "routing", "prompts", "budget", "pricing_override
 SettingsPatch = create_model(
     "SettingsPatch",
     **{
-        name: (f.annotation | None, None)
+        name: _PATCH_CONSTRAINTS.get(name, (f.annotation | None, None))
         for name, f in RuntimeSettings.model_fields.items()
         if name not in _PATCH_EXCLUDE
     },

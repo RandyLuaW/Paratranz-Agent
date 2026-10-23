@@ -583,7 +583,7 @@ def writeback(
     ),
     in_place: bool = typer.Option(False, "--in-place", help="原地修改游戏文件（危险，需 --yes）"),
     platform_file: int = typer.Option(0, "--platform-file", help="只取某个平台文件的词条（默认全项目）"),
-    only: str = typer.Option("", "--only", help="只处理路径包含这些子串的文件（逗号分隔）"),
+    only: str = typer.Option("", "--only", help="只处理相对路径等于或位于这些路径之下的文件（逗号分隔，如 data/Actors.json 或 data）"),
     dry_run: bool = typer.Option(True, "--dry-run/--yes", help="默认预览，不落盘"),
     mock: bool = typer.Option(False, "--mock"),
     as_json: bool = typer.Option(False, "--json"),

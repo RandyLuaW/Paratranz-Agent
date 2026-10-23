@@ -153,3 +153,21 @@ def export_paratranz(entries: Sequence[dict], *, translation: str = "") -> list[
         }
         for e in entries
     ]
+
+
+def export_upload_json(entries: Sequence[dict]) -> bytes:
+    """把词条打成一个 JSON 对象文件，供 `POST /files` 上传建**新文件**。
+
+    为什么是「key → 原文」的扁平对象：平台按**项目格式**解析上传内容，
+    `json` 格式项目的映射就是 key→value；而我们的 key 本身就是定位符
+    （`data/Actors.json::[12].name`），原样做键，回写时能直接对上。
+    字段顺序按 key 排序，同样的输入每次产出同样的字节（便于比对与去重）。
+
+    局限要讲清楚：项目格式不是 `json`（例如 twee、gettext）时，平台拿这份
+    JSON 解析不出词条。所以上传前一定要先看预览，别盲传。
+    """
+    import json
+
+    payload = {e["key"]: e["original"] for e in entries if e.get("key")}
+    text = json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True)
+    return text.encode("utf-8")

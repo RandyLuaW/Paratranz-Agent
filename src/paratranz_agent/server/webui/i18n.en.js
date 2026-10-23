@@ -523,4 +523,19 @@ Object.assign(window.I18N.en, {
   "请确认": "Please confirm",
 
   "没有匹配的模型": "No matching model",
+
+  "上传为新文件": "Upload as new file",
+  "文件名（须 .json 结尾）": "File name (must end with .json)",
+  "目标目录（可选，如 locale/）": "Target directory (optional, e.g. locale/)",
+  "留空 = 项目根目录": "Empty = project root",
+  "强制上传（跳过校验错误）": "Force upload (skip validation errors)",
+  "平台按项目格式解析上传内容：本项目格式若不是 JSON（如 twee、gettext），上传后可能建不出词条。所以务必先点「仅预览」看一眼内容。": "The platform parses uploads using the project format: if this project isn't JSON (e.g. twee, gettext), the upload may create no strings at all. Always click Preview first.",
+  "条词条": "strings",
+  "字节": "bytes",
+  "上传": "Upload",
+  "上传中…": "Uploading…",
+  "已提交上传任务": "Upload job submitted:",
+  "，跑完自动加载结果…": " — results load automatically when it finishes…",
+
+  "预览": "Preview",
 });
