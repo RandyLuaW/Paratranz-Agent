@@ -240,10 +240,7 @@ def test_agent_path_does_not_auto_run_dangerous_tools():
     审计实测「忽略之前规则」这类输入能让它真的执行本机代码。
     这条用源码断言守住提交处的过滤逻辑（避免搭整套 app 夹具）。
     """
-    src = (ROOT / "src/paratranz_agent/server/app.py").read_text(encoding="utf-8")
-    i = src.index('@app.post("/api/agent")')
-    j = src.index('@app.get("/api/usage/summary")')
-    block = src[i:j]
+    block = (ROOT / "src/paratranz_agent/server/routes/agent.py").read_text(encoding="utf-8")
     assert "DANGEROUS_TOOLS" in block, "agent 提交处必须过滤危险工具"
     assert "needs_confirm" in block, "被拦下的危险步骤要回给用户看"
 
