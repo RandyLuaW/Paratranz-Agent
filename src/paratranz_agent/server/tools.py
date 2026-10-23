@@ -175,6 +175,7 @@ class AppContext:
             p.base_url, p.api_key, m.id, m.temperature, m.max_tokens,
             p.timeout, p.max_retries, p.concurrency,
             tuple(sorted((m.extra_params or {}).items())),
+            tuple(sorted((p.headers or {}).items())),
         )
         cached = self._llms.get(ref)
         if cached is not None and self._llm_fps.get(ref) == fp:
@@ -190,6 +191,7 @@ class AppContext:
                 max_retries=p.max_retries,
                 concurrency=p.concurrency,
                 extra_params=dict(m.extra_params or {}),
+                headers=dict(p.headers or {}),
             )
         )
         llm.on_usage = self._on_usage

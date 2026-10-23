@@ -191,12 +191,16 @@ class JobRunner:
             ctx_token = current_job.set((job.id, job.tool))
             try:
                 result = fn(job=job, runner=self, **job.args)
+                # 结果先落地再说取消：pipeline 是在「检查点」退出的，
+                # 它返回的那份统计里就写着"已经写进平台多少条"。原先取消时
+                # 直接把结果丢掉，用户看到的是一个 cancelled 的空任务，
+                # 完全不知道平台已经被改了多少（审计报告5 服务端）。
+                job.result = result if isinstance(result, dict) else {"value": result}
                 if self.is_cancelled(job.id):
                     job.status = "cancelled"
-                    self.log(job, "已取消", level="warn")
+                    self.log(job, "已取消（已写入的部分结果保留在 result 里）", level="warn")
                 else:
                     job.status = "done"
-                    job.result = result if isinstance(result, dict) else {"value": result}
                     self.log(job, "完成")
             except Exception as exc:  # noqa: BLE001 - 单任务失败不影响队列
                 job.status = "failed"

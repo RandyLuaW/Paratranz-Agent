@@ -1024,6 +1024,7 @@ function provForm(d, p) {
       </div>
     </div>
     <div id="modelRows">${modelRows(p)}</div>
+    <div id="mSearchHint" class="empty" style="display:none"></div>
     <div id="discoverBox"></div>
   </div>`;
 }
@@ -1199,6 +1200,28 @@ function bindProvForm(main, d, p) {
       btn.textContent = '检查全部';
     }
   };
+
+  // 搜索框：按行文本过滤（模型 id / 显示名 / 能力都算命中）。
+  // 刻意**不重绘表格**：行内的启用开关、测试、删除都是在上面绑好的，
+  // 重绘会把这些处理器一起丢掉，点了没反应。
+  const search = $('#mSearch');
+  if (search) {
+    search.oninput = () => {
+      const q = search.value.trim().toLowerCase();
+      let shown = 0;
+      const rows = main.querySelectorAll('#modelRows tbody tr');
+      rows.forEach((tr) => {
+        const hit = !q || tr.textContent.toLowerCase().includes(q);
+        tr.style.display = hit ? '' : 'none';
+        if (hit) shown += 1;
+      });
+      const hint = $('#mSearchHint');
+      if (hint) {
+        hint.style.display = q && !shown ? '' : 'none';
+        hint.textContent = q && !shown ? t('没有匹配的模型') : '';
+      }
+    };
+  }
 
   // 行内操作
   main.querySelectorAll('#modelRows tbody tr').forEach((tr) => {

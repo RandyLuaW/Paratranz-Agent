@@ -32,6 +32,17 @@ class JsonScanError(ValueError):
     """原文不是合法 JSON（或被截断）。"""
 
 
+# JSON 数字：标准形态之外的 `NaN` / `Infinity` / `-Infinity` 也要吃下去。
+# 真实游戏文件里这两种写法很常见（JS 的 JSON.stringify 会把 NaN 原样写出来，
+# 有些插件配置直接手写成 Infinity）。Python 的 json.loads 默认也接受它们 ——
+# 扫描器如果只认标准数字，整个文件会被判成「不是合法 JSON」，一条都写不回去。
+_NUMBER_RE = re.compile(r"-?(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|Infinity)|NaN")
+
+# 文件开头的 UTF-8 BOM：`read_text(encoding="utf-8")` 会把它留成 `\ufeff`，
+# 不跳过就会在第一个值处报「非法值起始字符」。
+_BOM = "\ufeff"
+
+
 class _Scanner:
     """极简 JSON 扫描器：只关心字符串字面量的位置与路径。"""
 
@@ -86,10 +97,10 @@ class _Scanner:
             self.i += 1
 
     def _number(self) -> None:
-        m = re.match(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", self.s[self.i :])
+        m = _NUMBER_RE.match(self.s, self.i)
         if not m:
             raise self._err(f"非法值起始字符 {self.s[self.i]!r}")
-        self.i += m.end()
+        self.i = m.end()
 
     # ---------------------------------------------------------------- 递归
     def value(self, path: tuple[Any, ...]) -> None:
@@ -161,8 +172,11 @@ def scan_strings(text: str) -> dict[tuple[Any, ...], tuple[int, int, str]]:
     """扫描 JSON 原文，返回 {路径: (字面量起点, 终点, 解码值)}。
 
     只收录**字符串值**（不含对象键）；路径用元组表示，如 `("events", 3, "name")`。
+    BOM 只在最开头被跳过 —— 位置偏移仍按原文计算，拼接时不会错位。
     """
     sc = _Scanner(text)
+    if text.startswith(_BOM):
+        sc.i = 1
     sc.value(())
     sc._ws()
     if sc.i != sc.n:

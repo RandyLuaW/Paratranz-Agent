@@ -218,21 +218,34 @@ class StyleGuidePipeline:
 - 规范本身需要修订 → 在本公告下评论，下一版由 Agent 重新生成。
 """
 
-    def _project_name(self) -> str:
+    def _project_name(self, *, strict: bool = False) -> str:
         """项目名：配置里没有就用平台真实名字，再退化成「本项目」。
 
         真实项目里 `cfg.project.name` 常常是空的（yaml 模板默认 ""），
-        不兜底的话规范标题会变成「本项目 汉化规范」，发到公告区很难看。
+        不兜底的话规范正文里会出现空名字。
+
+        `strict=True` 用于**标题**：标题是「已存在则更新」的匹配依据，
+        拿不到真实名字就会拼出「本项目 汉化规范」，与平台上已有的
+        「XX 汉化规范」匹配不上 —— 于是每次发布都新建一条同名公告。
+        这种情况必须报错，不能凑合。
         """
         name = (self.cfg.project.name or "").strip()
         if name:
             return name
         if not hasattr(self, "_cached_project_name"):
             self._cached_project_name = ""
+            self._cached_project_name_error = ""
             try:
                 self._cached_project_name = (self.client.get_project().name or "").strip()
-            except Exception:  # noqa: BLE001 - 拿不到名字不该让规范生成失败
-                pass
+            except Exception as exc:  # noqa: BLE001 - 拿不到名字不该让正文生成失败
+                self._cached_project_name_error = f"{type(exc).__name__}: {exc}"
+        if strict and not self._cached_project_name and self._cached_project_name_error:
+            raise RuntimeError(
+                "读取项目名失败，无法确定规范公告标题（"
+                + self._cached_project_name_error
+                + "）。标题是「已存在则更新」的匹配依据，凑合拼一个会导致"
+                "每次发布都新建一条同名公告，因此本次发布已中止。"
+            )
         return self._cached_project_name or "本项目"
 
     # ------------------------------------------------------------------ 发布
@@ -242,7 +255,7 @@ class StyleGuidePipeline:
 
     def _style_title(self) -> str:
         """固定标题：不含日期，才能「已存在则更新」而不是每天新建。"""
-        return f"{self._project_name()} 汉化规范"
+        return f"{self._project_name(strict=True)} 汉化规范"
 
     @classmethod
     def _title_identity(cls, title: str) -> str:
@@ -264,14 +277,22 @@ class StyleGuidePipeline:
         # 已存在同标题公告则更新，避免刷屏。
         # 匹配按归一后的标题，所以旧版带日期的公告也会被接管并改名，
         # 不会在切换版本的当天多出一条。
+        #
+        # 列取失败**必须报错**：把「列不出来」当成「没有」就会重复发一条同名
+        # 公告。公告是给全组人看的，重复比失败难收拾得多（审计报告5 3.1 的根因）。
         existing = None
         try:
             for ann in self.client.list_announcements(page=1, page_size=50):
                 if self._title_identity(ann.title) == identity:
                     existing = ann
                     break
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 - 转成明确的失败信息
+            raise RuntimeError(
+                "无法列出项目现有公告（"
+                + f"{type(exc).__name__}: {exc}"
+                + "），无法判断该更新哪一条。为避免重复发布同名公告，本次发布已中止，"
+                "请稍后重试。"
+            ) from exc
 
         if dry_run:
             return {"title": title, "action": "update" if existing else "create", "dry_run": True,

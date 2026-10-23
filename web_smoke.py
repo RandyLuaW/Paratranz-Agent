@@ -1549,6 +1549,16 @@ def main() -> int:
         # `_i18nBusy` 永远为 true，此后整页不再翻译（无头/后台标签页必现）。
         check("i18n 派发不依赖 rAF 单独兜底",
               "setTimeout(run, 50)" in i18n_js.text)
+
+        print("\n== 审计遗留项（无死控件 / 无静默降级）==")
+        check("模型搜索框已接线（不再是死控件）",
+              'id="mSearch"' in app_js and "search.oninput" in app_js
+              and "mSearchHint" in app_js)
+        check("搜索过滤不重绘表格（否则行内按钮会失去处理器）",
+              "rows.forEach((tr) =>" in app_js and "tr.style.display" in app_js)
+        check("写回报告四个「未写入」分项齐全",
+              all(k in app_js for k in ("unsupported", "skipped_no_original",
+                                        "skipped_untracked", "details")))
         h = c.get("/api/health").json()
         check("health 暴露 version", isinstance(h.get("version"), str) and h["version"],
               str(h.get("version")))

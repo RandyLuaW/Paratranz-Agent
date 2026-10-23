@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from ..deps import Deps
+from ..params import as_float
 
 
 def register(app: FastAPI, d: Deps) -> None:
@@ -42,8 +43,11 @@ def register(app: FastAPI, d: Deps) -> None:
         for model, price in (body or {}).items():
             if not isinstance(price, dict):
                 continue
-            current[model] = {k: float(v) for k, v in price.items()
-                              if k in ("input", "input_cached", "output", "cache_creation")}
+            current[model] = {
+                k: as_float(v, name=f"{model}.{k}")
+                for k, v in price.items()
+                if k in ("input", "input_cached", "output", "cache_creation")
+            }
         store.save({"pricing_overrides": current})
         ctx.usage.pricing = {**ctx.usage.pricing, **current}
         return {"ok": True, "overrides": current}

@@ -41,6 +41,9 @@ class LLMCfg(BaseModel):
     batch_size: int = 40
     # 模型级附加请求体参数（top_p / reasoning_effort 等），合并进请求体
     extra_params: dict[str, Any] = Field(default_factory=dict)
+    # 源级自定义请求头（中转站/网关常要 `HTTP-Referer`、`X-Title`、自定义鉴权头）。
+    # 与 extra_params 分工：这个是 HTTP 头，那个是请求体字段。
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class TranslateCfg(BaseModel):

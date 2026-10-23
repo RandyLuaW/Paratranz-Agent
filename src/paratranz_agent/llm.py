@@ -192,13 +192,15 @@ class OpenAICompatLLM(BaseLLM):
     def __init__(self, cfg: LLMCfg):
         super().__init__()
         self.cfg = cfg
+        # 源级自定义头先铺，`Authorization` / `Content-Type` 最后写：
+        # 自定义头可以让网关加标识、换 header 名，但不应该悄悄顶掉我们自己的密钥。
+        headers = {k: str(v) for k, v in (cfg.headers or {}).items()}
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+        headers["Content-Type"] = "application/json"
         self._client = httpx.Client(
             base_url=cfg.base_url.rstrip("/"),
             timeout=cfg.timeout,
-            headers={
-                "Authorization": f"Bearer {cfg.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
 
     def available(self) -> bool:

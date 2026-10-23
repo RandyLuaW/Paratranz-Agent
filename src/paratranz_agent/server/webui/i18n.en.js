@@ -521,4 +521,6 @@ Object.assign(window.I18N.en, {
   "例如：漏了 Map 里的对话；把纯数字过滤掉": "e.g. it misses dialogue in Maps; drop pure numbers",
 
   "请确认": "Please confirm",
+
+  "没有匹配的模型": "No matching model",
 });

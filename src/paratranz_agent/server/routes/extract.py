@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from ..deps import Deps
+from ..params import as_int
 
 
 def register(app: FastAPI, d: Deps) -> None:
@@ -223,13 +224,14 @@ def register(app: FastAPI, d: Deps) -> None:
         file_id = body.get("file_id")
         if not file_id:
             raise HTTPException(400, "选择目标文件")
+        file_id_int = as_int(file_id, name="file_id")
         filename = str(body.get("filename") or "extract.json")
 
         if not body.get("dry_run"):
             ctx.guard()
             job = runner.submit(
                 "extraction_import",
-                {"extraction_id": jid, "file_id": int(file_id),
+                {"extraction_id": jid, "file_id": file_id_int,
                  "force": bool(body.get("force"))},
             )
             ctx.logs.add(
@@ -253,7 +255,7 @@ def register(app: FastAPI, d: Deps) -> None:
         items = export_paratranz(merged)
 
         try:
-            existing = ctx.client.existing_keys(int(file_id))
+            existing = ctx.client.existing_keys(file_id_int)
         except Exception as exc:  # noqa: BLE001 - 平台不可达要明确报错
             # 以前这里是 `existing, to_create = set(), items`，平台一挂就显示
             # 「将发送全部 N 条」——把失败伪装成成功预览。宁可报错。
@@ -269,7 +271,7 @@ def register(app: FastAPI, d: Deps) -> None:
             "sample": to_create[:20],
             "report": report,
             "filename": filename,
-            "file_id": int(file_id),
+            "file_id": file_id_int,
         }
 
     @app.post("/api/extract/analyze")

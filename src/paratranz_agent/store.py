@@ -93,13 +93,36 @@ class TMHit:
     origin: str
 
 
+def open_sqlite(path: str | Path) -> sqlite3.Connection:
+    """打开本地 SQLite 连接：**跨进程同时可用**是硬要求。
+
+    WebUI 常驻时会一直握着连接，与此同时在命令行跑 `ptz translate` 是日常操作。
+    默认配置下第二个写者会立刻拿到 `database is locked`（sqlite3 的默认等待只有
+    5 秒，而且没有 busy handler 的语义保证），整条流水线就断了 —— 而用户看到的
+    只是一个莫名其妙的失败。
+
+    这里统一做三件事：
+    - `timeout=30`：给写锁 30 秒等待窗口；
+    - `PRAGMA busy_timeout`：读写路径都遵守同一个等待时间；
+    - `journal_mode=WAL`：允许「一个写者 + 多读者」并存，读不再被写阻塞。
+
+    WAL 在只读介质/网络盘上可能不生效，此时 PRAGMA 会**返回原模式而不是报错**，
+    连接照样可用（等待时间仍然放宽了），所以不需要额外兜底分支。
+    """
+    conn = sqlite3.connect(str(path), timeout=30.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
+
+
 class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self.db = sqlite3.connect(str(self.path), check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        self.db = open_sqlite(self.path)
         with self._lock:
             self.db.executescript(SCHEMA)
             self.db.commit()

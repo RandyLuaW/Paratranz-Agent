@@ -12,12 +12,13 @@
 """
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+from ..store import open_sqlite
 
 # 内置定价（USD / 百万 token）。字段含义：
 #   input          —— 非缓存输入
@@ -182,8 +183,9 @@ class UsageStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self.db = sqlite3.connect(str(self.path), check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        # 与 agent.db 共用同一个打开方式：WebUI 常驻 + 命令行同时跑时，
+        # 默认 5 秒等待会让第二个写者直接 `database is locked`。
+        self.db = open_sqlite(self.path)
         with self._lock:
             self.db.executescript(SCHEMA)
             self.db.commit()

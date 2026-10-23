@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from ..deps import Deps
+from ..params import as_int
 
 
 def register(app: FastAPI, d: Deps) -> None:
@@ -31,7 +32,7 @@ def register(app: FastAPI, d: Deps) -> None:
         if not meta.get("game_dir"):
             raise HTTPException(400, "该提取记录没有记录游戏目录，无法回写")
 
-        min_stage = int(body.get("min_stage") or 3)
+        min_stage = as_int(body.get("min_stage"), name="min_stage", default=3)
         if min_stage not in (1, 3, 5):
             raise HTTPException(400, "译文门槛只能是 1/3/5")
         mode = str(body.get("mode") or "").strip().lower()
@@ -55,7 +56,7 @@ def register(app: FastAPI, d: Deps) -> None:
                 "in_place": in_place,
                 "accept_risk": bool(body.get("accept_risk")),
                 "dry_run": dry_run,
-                "platform_file": int(body.get("platform_file") or 0),
+                "platform_file": as_int(body.get("platform_file"), name="platform_file"),
             },
         )
         ctx.logs.add(
