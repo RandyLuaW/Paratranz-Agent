@@ -14,11 +14,16 @@
 
 写回器不碰文件系统：只吃「文件当前内容 + 待写条目」，吐「新内容 + 逐条结果」。
 IO、原文校验、备份、输出目录都由 pipeline 统一负责，这样每个写回器都能纯函数式单测。
+
+**只有两族定位符，就只写两个函数**：`json_path.apply_json` 与 `line.apply_line`，
+由 `apply.apply_items` 按 `ParsedLocator.family` 一次分派。早先这里定义过一个
+`Writer` 协议 + `default_writers()` 注册表 + `_owns()` 谓词，用于「将来可能加
+更多写回器」——但定位符家族在 `locator.parse_locator` 里已经判定完了，
+那套插件机制没有带来任何扩展性，只是让一次调用变成「遍历列表 + 逐项问归属」。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Protocol, Sequence
 
 # 一条待写回的译文（来自平台）
 @dataclass
@@ -55,32 +60,6 @@ class ApplyResult:
     @property
     def ok(self) -> bool:
         return not self.errors
-
-
-class Writer(Protocol):
-    """写回器协议。
-
-    实现者只需回答两个问题：
-    1. `can_handle(locator)`：这个定位符归我管吗（如 `L45` 行号、`[12].name` 路径）；
-    2. `apply(content, items, opts=...)`：给我文件原文与译文，返回新内容与逐条结果。
-
-    `opts` 是**提取器当时的参数**（`extractor.yaml` 的 args 键值）：行号类定位符
-    不知道提取用的正则就还原不出原字符串，必须靠它。JSON 路径类定位符用不上。
-    """
-
-    name: str
-
-    def can_handle(self, locator: str) -> bool:  # pragma: no cover - 协议定义
-        ...
-
-    def apply(
-        self,
-        content: str,
-        items: Sequence[WriteItem],
-        *,
-        opts: Mapping[str, str] | None = None,
-    ) -> ApplyResult:  # pragma: no cover
-        ...
 
 
 def split_key(key: str) -> tuple[str, str]:

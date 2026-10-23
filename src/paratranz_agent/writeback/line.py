@@ -19,6 +19,13 @@
 逐行扫描只作为备用解释（带 `^` 锚点的按行正则需要它）。没有 `pattern` 时退化成
 「行内所有引号串按出现顺序」，只对得上顺序，认不出别的过滤条件。
 
+**四条候选来源都走得到，别当冗余删掉**：整份·严格、整份·放宽（原被长度/字母过滤
+挡掉的短串）、逐行·按正则（`^` 锚点）、逐行·引号串兜底（无 pattern）。在现有测试集
+上挂计数器跑过一遍，四条各命中 6 / 6 / 7 / 25 次，`_pick` 的三种结局（对上原文 /
+只能给最可信解释 / 凑不出候选）也都出现过。对应断言分别在
+`test_pattern_index_skips_hits_the_extractor_filtered`、
+`test_anchored_pattern_on_a_later_line_uses_local_scan` 与三个 `test_fallback_*` 里。
+
 写回语义的三条硬约束：
 
 1. **绝不猜位置**。定位不到 → `missing`；定位到了但文件里当前的文本与 `original`
@@ -282,117 +289,109 @@ def _escape(text: str, *, json_mode: bool) -> str:
     return text
 
 
-class LineWriter:
-    """行号族（`L<行>` / `L<行>#<序号>`）写回器。"""
+def apply_line(
+    content: str,
+    items: Sequence[WriteItem],
+    *,
+    opts: Mapping[str, str] | None = None,
+) -> ApplyResult:
+    """行号族（`L<行>` / `L<行>#<序号>`）写回。
 
-    name = "line"
+    `opts` 是**提取器当时的参数**：行号定位符只知道「第几行第几个命中」，
+    不知道当初用什么 pattern/group 提取就还原不出原文，必须靠它。
 
-    def can_handle(self, locator: str) -> bool:
-        """只认 `L<行>` 与 `L<行>#<序号>` 两种形态。
+    把 `items` 里的译文写回 `content`，返回新内容与逐条结果（不碰文件系统）。
+    """
+    result = ApplyResult(content=content)
+    settings, settings_error = _Settings(), ""
+    try:
+        settings = _Settings.from_opts(opts)
+    except ValueError as exc:
+        # 参数坏了就一条都定位不了：逐条记 errors，绝不瞎猜位置
+        settings_error = str(exc)
 
-        `L12.code401`（JSON 路径族）、`[3].name`、`gameTitle` 一律不认，交给别的写回器。
-        """
-        return _LOCATOR_RE.fullmatch((locator or "").strip()) is not None
+    spans = _line_spans(content)
+    catalog = _Catalog(settings, content, spans)
+    edits: list[_Edit] = []
+    for seq, item in enumerate(items):
+        rel, locator = split_key(item.key)
+        m = _LOCATOR_RE.fullmatch(locator)
+        if m is None:
+            result.unsupported.append(item.key)
+            continue
+        if settings_error:
+            result.errors.append((item.key, settings_error))
+            continue
+        outcome = _locate(
+            content,
+            spans,
+            catalog,
+            rel=rel,
+            key=item.key,
+            seq=seq,
+            line_no=int(m.group(1)),
+            index=int(m.group(2) or 0),
+            original=item.original,
+            translation=item.translation,
+        )
+        if outcome.edit is not None:
+            edits.append(outcome.edit)
+        elif outcome.missing:
+            result.missing.append(item.key)
+        elif outcome.mismatch:
+            result.mismatched.append((item.key, outcome.mismatch))
+        else:
+            result.errors.append((item.key, outcome.error))
 
-    def apply(
-        self,
-        content: str,
-        items: Sequence[WriteItem],
-        *,
-        opts: Mapping[str, str] | None = None,
-    ) -> ApplyResult:
-        """把 `items` 里的译文写回 `content`，返回新内容与逐条结果（不碰文件系统）。"""
-        result = ApplyResult(content=content)
-        settings, settings_error = _Settings(), ""
-        try:
-            settings = _Settings.from_opts(opts)
-        except ValueError as exc:
-            # 参数坏了就一条都定位不了：逐条记 errors，绝不瞎猜位置
-            settings_error = str(exc)
+    result.content, accepted = _splice(content, edits, result)
+    result.written = [e.key for e in sorted(accepted, key=lambda e: e.seq)]
+    return result
 
-        spans = _line_spans(content)
-        catalog = _Catalog(settings, content, spans)
-        edits: list[_Edit] = []
-        for seq, item in enumerate(items):
-            rel, locator = split_key(item.key)
-            m = _LOCATOR_RE.fullmatch(locator)
-            if m is None:
-                result.unsupported.append(item.key)
-                continue
-            if settings_error:
-                result.errors.append((item.key, settings_error))
-                continue
-            outcome = self._locate(
-                content,
-                spans,
-                catalog,
-                rel=rel,
-                key=item.key,
-                seq=seq,
-                line_no=int(m.group(1)),
-                index=int(m.group(2) or 0),
-                original=item.original,
-                translation=item.translation,
-            )
-            if outcome.edit is not None:
-                edits.append(outcome.edit)
-            elif outcome.missing:
-                result.missing.append(item.key)
-            elif outcome.mismatch:
-                result.mismatched.append((item.key, outcome.mismatch))
-            else:
-                result.errors.append((item.key, outcome.error))
 
-        result.content, accepted = _splice(content, edits, result)
-        result.written = [e.key for e in sorted(accepted, key=lambda e: e.seq)]
-        return result
+def _locate(
+    content: str,
+    spans: Sequence[tuple[int, int]],
+    catalog: _Catalog,
+    *,
+    rel: str,
+    key: str,
+    seq: int,
+    line_no: int,
+    index: int,
+    original: str,
+    translation: str,
+) -> _Outcome:
+    """在原文里定位这一条要替换的片段；四种结局：写 / 缺 / 不符 / 报错。"""
+    if line_no < 1 or line_no > len(spans):
+        return _Outcome(missing=True)  # 文件里根本没这一行（提取后又改过）
+    expected = original.strip()
+    if not expected:
+        # 没原文就无法确认「文件里这段还是不是当初那句」，宁可不动
+        return _Outcome(mismatch="平台未提供原文，无法校验当前位置，拒绝写入")
 
-    # ------------------------------------------------------------- 单条定位
-    def _locate(
-        self,
-        content: str,
-        spans: Sequence[tuple[int, int]],
-        catalog: _Catalog,
-        *,
-        rel: str,
-        key: str,
-        seq: int,
-        line_no: int,
-        index: int,
-        original: str,
-        translation: str,
-    ) -> _Outcome:
-        """在原文里定位这一条要替换的片段；四种结局：写 / 缺 / 不符 / 报错。"""
-        if line_no < 1 or line_no > len(spans):
-            return _Outcome(missing=True)  # 文件里根本没这一行（提取后又改过）
-        expected = original.strip()
-        if not expected:
-            # 没原文就无法确认「文件里这段还是不是当初那句」，宁可不动
-            return _Outcome(mismatch="平台未提供原文，无法校验当前位置，拒绝写入")
+    picked = _pick(catalog.for_line(line_no), index, expected)
+    if picked is None:
+        return _Outcome(missing=True)  # 这一行凑不出第 index 个命中
+    hit, matched = picked
+    if not matched:
+        return _Outcome(mismatch=f"原文不一致：文件里是 {hit.text.strip()!r}")
+    if "\n" in hit.text or "\r" in hit.text:
+        # 提取器的正则能跨行配对（引号数为奇数时），这种命中落不了地：
+        # 替换它会把换行/缩进一起吃掉，行号写回器不干这种事
+        return _Outcome(
+            error="命中的原文跨行，行号型写回无法表示（建议修正提取器的 pattern）"
+        )
 
-        picked = _pick(catalog.for_line(line_no), index, expected)
-        if picked is None:
-            return _Outcome(missing=True)  # 这一行凑不出第 index 个命中
-        hit, matched = picked
-        if not matched:
-            return _Outcome(mismatch=f"原文不一致：文件里是 {hit.text.strip()!r}")
-        if "\n" in hit.text or "\r" in hit.text:
-            # 提取器的正则能跨行配对（引号数为奇数时），这种命中落不了地：
-            # 替换它会把换行/缩进一起吃掉，行号写回器不干这种事
-            return _Outcome(
-                error="命中的原文跨行，行号型写回无法表示（建议修正提取器的 pattern）"
-            )
-
-        # 只替换 strip 之后的那一段，保住原文件里的前导缩进与尾随空格
-        lead = len(hit.text) - len(hit.text.lstrip())
-        tail = len(hit.text) - len(hit.text.rstrip())
-        start, end = hit.start + lead, hit.end - tail
-        json_mode = rel.lower().endswith(".json") or _wrapped_in_double_quotes(content, start, end)
-        try:
-            text = _escape(translation, json_mode=json_mode)
-        except _Unrepresentable as exc:
-            return _Outcome(error=str(exc))
-        return _Outcome(edit=_Edit(seq=seq, key=key, start=start, end=end, text=text))
+    # 只替换 strip 之后的那一段，保住原文件里的前导缩进与尾随空格
+    lead = len(hit.text) - len(hit.text.lstrip())
+    tail = len(hit.text) - len(hit.text.rstrip())
+    start, end = hit.start + lead, hit.end - tail
+    json_mode = rel.lower().endswith(".json") or _wrapped_in_double_quotes(content, start, end)
+    try:
+        text = _escape(translation, json_mode=json_mode)
+    except _Unrepresentable as exc:
+        return _Outcome(error=str(exc))
+    return _Outcome(edit=_Edit(seq=seq, key=key, start=start, end=end, text=text))
 
 
 def _pick(

@@ -24,7 +24,7 @@ from paratranz_agent.server.tools import (  # noqa: E402
     DANGEROUS_TOOLS,
     require_risk_ack,
 )
-from paratranz_agent.writeback import JsonPathWriter, WriteItem, run_writeback  # noqa: E402
+from paratranz_agent.writeback import WriteItem, apply_json, run_writeback  # noqa: E402
 
 
 # ------------------------------------------------- 1. review fail-open
@@ -171,7 +171,7 @@ def test_json_write_tolerates_whitespace_difference():
     逐字比对会让这类词条永远写不进去，报错还写成「文件里是 Alice，平台记录是 Alice」。
     """
     src = '{"a": "  Hello there  "}'
-    res = JsonPathWriter().apply(
+    res = apply_json(
         src, [WriteItem(key="f.json::a", translation="你好", original="Hello there")]
     )
     assert res.written == ["f.json::a"]

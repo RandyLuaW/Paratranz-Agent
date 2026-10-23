@@ -170,64 +170,58 @@ def scan_strings(text: str) -> dict[tuple[Any, ...], tuple[int, int, str]]:
     return sc.spans
 
 
-class JsonPathWriter:
-    """JSON 路径型写回器（`[12].name`、`events[3].pages[0].list[2].parameters[0]`…）。"""
+def apply_json(
+    content: str,
+    items: Sequence[WriteItem],
+    *,
+    opts: Mapping[str, str] | None = None,
+) -> ApplyResult:
+    """JSON 路径族写回：`[12].name`、`events[3].pages[0].list[2].parameters[0]`…
 
-    name = "json"
-
-    def can_handle(self, locator: str) -> bool:
-        try:
-            return parse_locator(locator).family == "json"
-        except LocatorError:
-            return False
-
-    def apply(
-        self,
-        content: str,
-        items: Sequence[WriteItem],
-        *,
-        opts: Mapping[str, str] | None = None,
-    ) -> ApplyResult:
-        res = ApplyResult()
-        try:
-            spans = scan_strings(content)
-        except JsonScanError as exc:
-            # 整个文件解析不了：所有条目都记错误，绝不部分写入
-            for it in items:
-                res.errors.append((it.key, f"文件不是合法 JSON：{exc}"))
-            res.content = content
-            return res
-
-        edits: list[tuple[int, int, str]] = []
+    `opts` 用不上（路径定位符自带全部信息），保留同一签名是为了让
+    `apply.apply_items` 能一视同仁地分派。
+    """
+    del opts
+    res = ApplyResult()
+    try:
+        spans = scan_strings(content)
+    except JsonScanError as exc:
+        # 整个文件解析不了：所有条目都记错误，绝不部分写入
         for it in items:
-            try:
-                parsed = parse_locator(it.key.split("::", 1)[-1])
-            except LocatorError as exc:
-                res.unsupported.append(f"{it.key}（{exc}）")
-                continue
-            span = spans.get(parsed.steps)
-            if span is None:
-                res.missing.append(it.key)
-                continue
-            start, end, current = span
-            if current == it.translation:
-                # 已经是目标状态：幂等，不重复改
-                res.written.append(it.key)
-                continue
-            # 提取器会把 original `strip()` 后上传（`generic-json` 的 `s = node.strip()`），
-            # 所以文件里的字面量可能带首尾空白而平台记录没有。逐字比对会让这类词条
-            # **永远写不进去**，而且报错还写成「原文不一致：文件里是 Alice，平台记录是 Alice」。
-            if current != it.original and current.strip() != it.original.strip():
-                res.mismatched.append(
-                    (it.key, f"原文不一致：文件里是 {_short(current)}，平台记录是 {_short(it.original)}")
-                )
-                continue
-            # 只替换引号内的内容：start+1 跳过开引号，end-1 跳过闭引号
-            edits.append((start + 1, end - 1, json_escape(it.translation)))
-            res.written.append(it.key)
-
-        res.content = _splice(content, edits)
+            res.errors.append((it.key, f"文件不是合法 JSON：{exc}"))
+        res.content = content
         return res
+
+    edits: list[tuple[int, int, str]] = []
+    for it in items:
+        try:
+            parsed = parse_locator(it.key.split("::", 1)[-1])
+        except LocatorError as exc:
+            res.unsupported.append(f"{it.key}（{exc}）")
+            continue
+        span = spans.get(parsed.steps)
+        if span is None:
+            res.missing.append(it.key)
+            continue
+        start, end, current = span
+        if current == it.translation:
+            # 已经是目标状态：幂等，不重复改
+            res.written.append(it.key)
+            continue
+        # 提取器会把 original `strip()` 后上传（`generic-json` 的 `s = node.strip()`），
+        # 所以文件里的字面量可能带首尾空白而平台记录没有。逐字比对会让这类词条
+        # **永远写不进去**，而且报错还写成「原文不一致：文件里是 Alice，平台记录是 Alice」。
+        if current != it.original and current.strip() != it.original.strip():
+            res.mismatched.append(
+                (it.key, f"原文不一致：文件里是 {_short(current)}，平台记录是 {_short(it.original)}")
+            )
+            continue
+        # 只替换引号内的内容：start+1 跳过开引号，end-1 跳过闭引号
+        edits.append((start + 1, end - 1, json_escape(it.translation)))
+        res.written.append(it.key)
+
+    res.content = _splice(content, edits)
+    return res
 
 
 def _short(text: str, limit: int = 40) -> str:

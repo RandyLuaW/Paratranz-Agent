@@ -7,40 +7,41 @@
     print(rep.as_dict())
 
 分层：
-- `base`     —— 公共契约（`WriteItem` / `ApplyResult` / `Writer` 协议）
+- `base`     —— 公共契约（`WriteItem` / `ApplyResult`）
 - `locator`  —— 把 key 里的定位符解析成结构化路径（JSON 路径族 / 行号族）
 - `json_path`—— JSON 手术式替换（保住原文件格式，逐字面量校验原文）
 - `line`     —— 行号族替换（依赖提取器当时的 pattern/group）
+- `apply`    —— 按定位符族分派到上面两个函数（唯一的写回入口）
 - `pipeline` —— 拉平台译文、分组、校验、输出/原地写+备份、出报告
 """
 from __future__ import annotations
 
-from .base import ApplyResult, WriteItem, Writer, split_key
-from .json_path import JsonPathWriter, json_escape, scan_strings
+from .apply import apply_items, family_of_key
+from .base import ApplyResult, WriteItem, split_key
+from .json_path import apply_json, json_escape, scan_strings
+from .line import apply_line
 from .locator import LocatorError, ParsedLocator, parse_locator, steps_to_locator
 from .pipeline import (
     MIN_STAGE_ZH,
     WritebackError,
     WritebackReport,
-    default_writers,
-    locator_family_of,
     pull_translations,
     run_writeback,
 )
 
 __all__ = [
     "ApplyResult",
-    "JsonPathWriter",
     "LocatorError",
     "MIN_STAGE_ZH",
     "ParsedLocator",
     "WriteItem",
     "WritebackError",
     "WritebackReport",
-    "Writer",
-    "default_writers",
+    "apply_items",
+    "apply_json",
+    "apply_line",
+    "family_of_key",
     "json_escape",
-    "locator_family_of",
     "parse_locator",
     "pull_translations",
     "run_writeback",

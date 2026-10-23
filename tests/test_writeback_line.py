@@ -10,8 +10,9 @@ import json
 
 import pytest
 
+from paratranz_agent.writeback.apply import family_of_key
 from paratranz_agent.writeback.base import WriteItem
-from paratranz_agent.writeback.line import LineWriter
+from paratranz_agent.writeback.line import apply_line
 
 # 纯文本文件：不是 .json，转义走「行内纯文本」分支
 REL = "locale/zh.txt"
@@ -50,7 +51,7 @@ def test_single_hit_single_line() -> None:
     content = doc('name = "Hello World"', 'title = "Second String"')
     items = [WriteItem(key=key("L1"), translation="你好世界", original="Hello World")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key("L1")]
     assert res.content == doc('name = "你好世界"', 'title = "Second String"')
@@ -69,7 +70,7 @@ def test_two_hits_on_same_line(reverse: bool) -> None:
     if reverse:
         items.reverse()
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert sorted(res.written) == sorted([key(f"L{line_no}"), key(f"L{line_no}#1")])
     assert res.content == doc_with({line_no: 'a = "第一"; b = "第二"'})
@@ -85,7 +86,7 @@ def test_longer_translation_does_not_shift_later_edits() -> None:
         WriteItem(key=key(f"L{tail}"), translation="结束", original="End"),
     ]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key(f"L{head}"), key(f"L{tail}")]
     assert res.content == doc_with(
@@ -97,7 +98,7 @@ def test_crlf_line_endings_are_preserved() -> None:
     content = 'a = "Hello World"\r\nb = "Second String"\r\n'
     items = [WriteItem(key=key("L1"), translation="你好世界", original="Hello World")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.content == 'a = "你好世界"\r\nb = "Second String"\r\n'
     assert res.written == [key("L1")]
@@ -113,7 +114,7 @@ def test_many_edits_in_one_call_stay_in_place() -> None:
         for n in targets
     ]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert sorted(res.written) == sorted(key(f"L{n}") for n in targets)
     assert res.content == doc_with({n: f'k{n} = "{translations[n]}"' for n in targets})
@@ -124,7 +125,7 @@ def test_spaces_inside_quotes_are_kept() -> None:
     content = doc('a = "   Hello World   "')
     items = [WriteItem(key=key("L1"), translation="你好世界", original="Hello World")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.content == doc('a = "   你好世界   "')
     assert res.written == [key("L1")]
@@ -135,7 +136,7 @@ def test_original_mismatch_writes_nothing() -> None:
     content = doc('name = "Hello World"')
     items = [WriteItem(key=key("L1"), translation="你好", original="Hallo Welt")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == []
     assert res.content == content
@@ -150,7 +151,7 @@ def test_empty_original_is_refused() -> None:
     content = doc('a = "Hello World"')
     items = [WriteItem(key=key("L1"), translation="你好", original="")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == []
     assert res.content == content
@@ -162,7 +163,7 @@ def test_missing_when_line_does_not_exist() -> None:
     absent = content.count("\n") + 5  # 文件里根本没有这一行
     items = [WriteItem(key=key(f"L{absent}"), translation="九", original="Nine")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.missing == [key(f"L{absent}")]
     assert res.written == []
@@ -173,7 +174,7 @@ def test_missing_when_index_exceeds_hits_on_line() -> None:
     content = doc('a = "One"; b = "Two"')
     items = [WriteItem(key=key("L1#9"), translation="十", original="Ten")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.missing == [key("L1#9")]
     assert res.content == content
@@ -187,7 +188,7 @@ def test_duplicate_keys_do_not_double_apply() -> None:
         WriteItem(key=key("L1"), translation="乙", original="Hello World"),
     ]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key("L1")]
     assert res.content == doc('a = "甲"')
@@ -202,7 +203,7 @@ def test_non_line_keys_are_unsupported() -> None:
         WriteItem(key="data/Map001.json::L45.code401", translation="文本", original="Text"),
     ]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key("L1")]
     assert res.unsupported == [
@@ -221,7 +222,7 @@ def test_mixed_outcomes_in_one_call() -> None:
         WriteItem(key=key("L8"), translation="八", original="Eight"),
     ]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key("L1")]
     assert [k for k, _ in res.mismatched] == [key("L3")]
@@ -236,10 +237,8 @@ def test_idempotent_second_round_reports_mismatch() -> None:
         WriteItem(key=key("L3"), translation="第一", original="First"),
         WriteItem(key=key("L3#1"), translation="第二", original="Second"),
     ]
-    writer = LineWriter()
-
-    first = writer.apply(content, items)
-    second = writer.apply(first.content, items)
+    first = apply_line(content, items)
+    second = apply_line(first.content, items)
 
     assert sorted(first.written) == sorted([key("L3"), key("L3#1")])
     assert second.written == []
@@ -254,7 +253,7 @@ def test_pattern_and_group_are_honoured() -> None:
     opts = {"pattern": r'^\s*(\w+)\s+"([^"]+)"', "group": "2", "encoding": "utf-8"}
     items = [WriteItem(key=key("L1"), translation="你好呀", original="Hello there")]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert res.written == [key("L1")]
     assert res.content == doc('    e "你好呀"  # 注释不动')
@@ -268,7 +267,7 @@ def test_pattern_multiple_hits_use_index() -> None:
         WriteItem(key=key("L1#2"), translation="叁", original="Three"),
     ]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert sorted(res.written) == sorted([key("L1"), key("L1#2")])
     assert res.content == doc('x = "壹" + "Two" + "叁"')
@@ -280,7 +279,7 @@ def test_pattern_index_skips_hits_the_extractor_filtered() -> None:
     opts = {"pattern": '"([^"]*)"', "group": "1", "min_len": "2"}
     items = [WriteItem(key=key("L1"), translation="够长了", original="Long Enough")]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert res.written == [key("L1")]
     assert res.content == doc('x = "a" + "够长了"')
@@ -298,7 +297,7 @@ def test_bad_extractor_opts_report_errors_and_write_nothing(opts: dict[str, str]
     content = doc('a = "Hello World"')
     items = [WriteItem(key=key("L1"), translation="你好", original="Hello World")]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert res.written == []
     assert res.content == content
@@ -316,7 +315,7 @@ def test_cross_line_hit_is_refused_not_written() -> None:
     opts = {"pattern": exact_quoted_pattern(), "group": "1"}
     items = [WriteItem(key=key("L1#1"), translation="名字", original="$ name =")]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert res.written == []
     assert res.content == content
@@ -330,7 +329,7 @@ def test_anchored_pattern_on_a_later_line_uses_local_scan() -> None:
     opts = {"pattern": r'^\s*(\w+)\s+"([^"]+)"', "group": "2"}
     items = [WriteItem(key=key("L3"), translation="你好呀", original="Hello there")]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert res.written == [key("L3")]
     assert res.content == doc_with({3: '    e "你好呀"'})
@@ -341,7 +340,7 @@ def test_fallback_uses_double_quoted_strings() -> None:
     content = doc('say "Hello World" now')
     items = [WriteItem(key=key("L1"), translation="你好世界", original="Hello World")]
 
-    res = LineWriter().apply(content, items, opts={"encoding": "utf-8"})
+    res = apply_line(content, items, opts={"encoding": "utf-8"})
 
     assert res.written == [key("L1")]
     assert res.content == doc('say "你好世界" now')
@@ -351,7 +350,7 @@ def test_fallback_uses_single_quoted_strings() -> None:
     content = doc("msg = 'Hello World'")
     items = [WriteItem(key=key("L1"), translation="你好世界", original="Hello World")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key("L1")]
     assert res.content == doc("msg = '你好世界'")
@@ -364,7 +363,7 @@ def test_fallback_counts_both_quote_styles_in_order() -> None:
         WriteItem(key=key("L1#1"), translation="贰", original="Two"),
     ]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert sorted(res.written) == sorted([key("L1"), key("L1#1")])
     assert res.content == doc("x = \"壹\" + '贰'")
@@ -375,7 +374,7 @@ def test_fallback_still_skips_too_short_strings() -> None:
     content = doc('x = "a" + "Long Enough"')
     items = [WriteItem(key=key("L1"), translation="够长了", original="Long Enough")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key("L1")]
     assert res.content == doc('x = "a" + "够长了"')
@@ -387,7 +386,7 @@ def test_escape_quotes_inside_double_quoted_text() -> None:
     content = doc('say "Hello World"')
     items = [WriteItem(key=key("L1"), translation='他说"你好"', original="Hello World")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.content == doc('say "他说\\"你好\\""')
     assert res.written == [key("L1")]
@@ -400,7 +399,7 @@ def test_escape_backslash_and_newline_in_json_file() -> None:
     translation = "C:\\存档\\第一行\n第二行"
     items = [WriteItem(key=key("L2", rel=rel), translation=translation, original="Hello World")]
 
-    res = LineWriter().apply(content, items)
+    res = apply_line(content, items)
 
     assert res.written == [key("L2", rel=rel)]
     assert json.loads(res.content)["k"] == translation  # 转义可逆
@@ -413,7 +412,7 @@ def test_plain_text_line_keeps_backslash_literal() -> None:
     opts = {"pattern": r"^msg (.+)$", "group": "1"}
     items = [WriteItem(key=key("L1"), translation="C:\\存档", original="Hello World")]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert res.written == [key("L1")]
     assert res.content == doc("msg C:\\存档")
@@ -425,7 +424,7 @@ def test_newline_in_plain_text_line_is_an_error() -> None:
     opts = {"pattern": r"^msg (.+)$", "group": "1"}
     items = [WriteItem(key=key("L1"), translation="第一行\n第二行", original="Hello World")]
 
-    res = LineWriter().apply(content, items, opts=opts)
+    res = apply_line(content, items, opts=opts)
 
     assert res.written == []
     assert res.content == content
@@ -452,14 +451,11 @@ def test_newline_in_plain_text_line_is_an_error() -> None:
         ("", False),
     ],
 )
-def test_can_handle_is_strict(locator: str, expected: bool) -> None:
-    assert LineWriter().can_handle(locator) is expected
+def test_line_family_is_strict(locator: str, expected: bool) -> None:
+    """行号族的判定必须严：JSON 路径族（`L12.code401`）绝不能被误吞。"""
+    assert (family_of_key(f"f.txt::{locator}") == "line") is expected
 
 
-def test_can_handle_ignores_surrounding_whitespace() -> None:
+def test_family_ignores_surrounding_whitespace() -> None:
     """key 拆出来的定位符可能带空格，剥掉后照常认。"""
-    assert LineWriter().can_handle("  L12#2  ") is True
-
-
-def test_writer_name() -> None:
-    assert LineWriter().name == "line"
+    assert family_of_key("f.txt::  L12#2  ") == "line"

@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from paratranz_agent.writeback import (  # noqa: E402
-    JsonPathWriter,
     LocatorError,
     WriteItem,
+    apply_json,
     json_escape,
     parse_locator,
     pull_translations,
@@ -71,18 +71,19 @@ def test_line_family_does_not_swallow_code_locator():
 def test_line_writer_and_locator_agree():
     """行号写回器自带的识别正则必须与 `parse_locator` 判断一致。
 
-    两处各写一份正则（写回器刻意不依赖兄弟模块），所以要有测试盯着它们别漂移。
+    `line.py` 刻意不 import `locator`（保持纯函数、可单独搬走），
+    所以仍有两处正则；`apply_items` 用的是 `parse_locator` 的判断，
+    一旦两者漂移，这里立刻红。
     """
-    from paratranz_agent.writeback.line import LineWriter
+    from paratranz_agent.writeback.line import _LOCATOR_RE
 
-    writer = LineWriter()
     for locator in ("L1", "L123", "L7#0", "L7#3", "L12.code401", "[3].name", "gameTitle", "#3", "L"):
         expect = False
         try:
             expect = parse_locator(locator).family == "line"
         except LocatorError:
             expect = False
-        assert writer.can_handle(locator) is expect, f"{locator} 两边判断不一致"
+        assert (_LOCATOR_RE.fullmatch(locator) is not None) is expect, f"{locator} 两边判断不一致"
 
 
 # --------------------------------------------------------------- 后端工具闸门
@@ -144,7 +145,7 @@ def test_scan_handles_escapes():
 
 # --------------------------------------------------------------- JSON 写回
 def _write(src, items):
-    return JsonPathWriter().apply(src, items)
+    return apply_json(src, items)
 
 
 def test_write_preserves_formatting_exactly():

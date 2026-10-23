@@ -35,8 +35,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..server import extraction
+from .apply import apply_items, family_of_key
 from .base import WriteItem, split_key
-from .locator import LocatorError, parse_locator
 
 MIN_STAGE_ZH = {1: "已翻译", 2: "有疑问", 3: "已检查", 5: "已审核", 9: "已锁定"}
 
@@ -164,19 +164,6 @@ def pull_translations(
     return out, stats
 
 
-def default_writers() -> list[Any]:
-    """两个写回器：JSON 路径族与行号族。
-
-    原来这里用 `try: from .line import LineWriter / except ImportError: pass`——
-    那是分模块开发期留下的兜底，`line.py` 早就是包内固定模块，捕获它只会
-    把「行号写回悄悄消失」变成静默降级。缺了就应该炸。
-    """
-    from .json_path import JsonPathWriter
-    from .line import LineWriter
-
-    return [JsonPathWriter(), LineWriter()]
-
-
 # --------------------------------------------------------------------- 主流程
 def run_writeback(
     *,
@@ -191,7 +178,6 @@ def run_writeback(
     platform_file: int | None = None,
     only_files: Sequence[str] | None = None,
     log: Callable[[str], None] | None = None,
-    writers: Sequence[Any] | None = None,
 ) -> WritebackReport:
     """执行一次回写。前置条件不满足就抛 `WritebackError`，此时一个文件都没碰。
 
@@ -280,7 +266,6 @@ def run_writeback(
         else:
             say(f"输出目录：{target_root}（只放被改动的文件）")
 
-    active = list(writers) if writers is not None else default_writers()
     manifest: dict[str, dict[str, str]] = {}
     # **真正被改写的文件**（不是「有待写词条的文件」）：镜像模式靠它决定跳过谁。
     # 用 by_file 当跳过集会漏掉「该文件的词条全部失败」的情况——那个文件既不复制
@@ -306,26 +291,22 @@ def run_writeback(
 
         content = original_text
         file_written = 0
-        for w in active:
-            mine = [it for it in items if _owns(w, it.key)]
-            if not mine:
-                continue
-            res = w.apply(content, mine, opts=opts)
-            content = res.content
-            file_written += len(res.written)
-            rep.written += len(res.written)
-            for key, why in res.mismatched:
-                rep.mismatched += 1
-                rep.add_detail("mismatched", key, why)
-            for key in res.missing:
-                rep.missing += 1
-                rep.add_detail("missing", key, "定位符在文件里找不到")
-            for key, why in res.errors:
-                rep.add_detail("error", key, why)
-                rep.add_error(f"{rel}: {key}: {why}")
-            for key in res.unsupported:
-                rep.unsupported += 1
-                rep.add_detail("unsupported", key, "没有写回器认这个定位符")
+        res = apply_items(content, items, opts=opts)
+        content = res.content
+        file_written += len(res.written)
+        rep.written += len(res.written)
+        for key, why in res.mismatched:
+            rep.mismatched += 1
+            rep.add_detail("mismatched", key, why)
+        for key in res.missing:
+            rep.missing += 1
+            rep.add_detail("missing", key, "定位符在文件里找不到")
+        for key, why in res.errors:
+            rep.add_detail("error", key, why)
+            rep.add_error(f"{rel}: {key}: {why}")
+        for key in res.unsupported:
+            rep.unsupported += 1
+            rep.add_detail("unsupported", key, "没有写回器认这个定位符")
 
         if not file_written:
             continue
@@ -423,10 +404,6 @@ def _norm_rel(rel: str) -> str:
     return rel.replace("\\", "/").strip("/").casefold()
 
 
-def _owns(writer: Any, key: str) -> bool:
-    return bool(writer.can_handle(split_key(key)[1]))
-
-
 def _resolve_out(gdir: Path, out_dir: str | Path, in_place: bool) -> Path:
     if in_place:
         return gdir
@@ -476,7 +453,4 @@ def _write_backup(backup_dir: Path, rel: str, text: str, encoding: str = "utf-8"
 
 def locator_family_of(key: str) -> str:
     """诊断用：这个 key 归哪一族，认不出返回 unknown。"""
-    try:
-        return parse_locator(split_key(key)[1]).family
-    except LocatorError:
-        return "unknown"
+    return family_of_key(key)
