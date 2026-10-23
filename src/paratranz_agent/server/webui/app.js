@@ -187,6 +187,14 @@ function applyChromeLang() {
   if (nav) translateDom(nav);
   if (top) translateDom(top);
   if (logp) translateDom(logp);
+  // 启动时就按当前语言标好 <html lang>：只在切换语言时设会让英文界面
+  // 顶着 lang="zh-CN"（影响读屏与拼写检查，也误导任何按 lang 判断的逻辑）
+  const root = document.documentElement;
+  if (root) {
+    const en = isEn();
+    root.setAttribute('lang', en ? 'en' : 'zh-CN');
+    root.dataset.lang = en ? 'en' : 'zh';
+  }
   if (isEn()) document.title = 'Paratranz Agent · Console';
 }
 
@@ -1096,7 +1104,10 @@ function bindProvForm(main, d, p) {
   };
 
   $('#delProv').onclick = async () => {
-    if (!confirm(`删除源「${p.name || p.id}」及其下 ${p.models.length} 个模型？`)) return;
+    const delMsg = isEn()
+      ? `Delete provider "${p.name || p.id}" and its ${p.models.length} model(s)?`
+      : `删除源「${p.name || p.id}」及其下 ${p.models.length} 个模型？`;
+    if (!(await askConfirm(delMsg))) return;
     try {
       await api('DELETE', `/api/providers/${encodeURIComponent(p.id)}`);
       state.selProvider = '';
@@ -1228,7 +1239,7 @@ function bindProvForm(main, d, p) {
       openModelModal(main, p, m);
     };
     tr.querySelector('.m_del').onclick = async () => {
-      if (!confirm(`删除模型「${mid}」？`)) return;
+      if (!(await askConfirm(isEn() ? `Delete model "${mid}"?` : `删除模型「${mid}」？`))) return;
       try {
         await api('DELETE',
           `/api/providers/${encodeURIComponent(p.id)}/models/${encodeURIComponent(mid)}`);
@@ -1747,7 +1758,42 @@ async function renderUsage(main) {
   } catch { /* 忽略 */ }
 }
 
+
+/* 确认弹窗。原生 confirm() 的按钮由系统语言决定、正文也不进 DOM，
+ * 英文界面里会中英混排，所以统一用自家弹窗。 */
+function askConfirm(message) {
+  return new Promise((resolve) => {
+    const el = document.createElement('div');
+    el.className = 'modal';
+    el.innerHTML = `
+      <div class="modal-box" style="width:min(460px,92vw)">
+        <div class="modal-head"><b>${t('请确认')}</b></div>
+        <div class="modal-body" style="font-size:13px;line-height:1.7">${esc(message)}</div>
+        <div class="modal-foot">
+          <div class="spacer"></div>
+          <button class="btn" id="cf_no">${t('取消')}</button>
+          <button class="btn danger" id="cf_yes">${t('确定')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    const done = (v) => { el.remove(); resolve(v); };
+    el.onclick = (ev) => { if (ev.target === el) done(false); };
+    el.querySelector('#cf_no').onclick = () => done(false);
+    el.querySelector('#cf_yes').onclick = () => done(true);
+    document.addEventListener('keydown', function esc(ev) {
+      if (ev.key !== 'Escape') return;
+      document.removeEventListener('keydown', esc);
+      done(false);
+    });
+  });
+}
+
 /* ================================================================== 提取 */
+// 倒计时按钮文案：每秒都在变，字典匹配不了，按语言直接给两种写法
+function countdownText(sec) {
+  return isEn() ? `Please read (${sec}s)` : `请阅读（${sec}s）`;
+}
+
 // 执行提取器 = 在本机跑任意代码，必须显式确认
 function confirmRisk(ext) {
   return new Promise((resolve) => {
@@ -1756,31 +1802,37 @@ function confirmRisk(ext) {
     el.innerHTML = `
       <div class="modal-box" style="width:min(560px,92vw)">
         <div class="modal-head" style="color:var(--err)">
-          <b>⚠ 执行提取器 = 在本机运行任意代码</b>
+          <b>${t('⚠ 执行提取器 = 在本机运行任意代码')}</b>
         </div>
         <div class="modal-body">
           <div class="notice warn" style="margin-bottom:12px">
-            「${esc(ext.name)}」的脚本会以<b>当前用户权限</b>在本机运行，它可以：
+            <div class="dim mono" style="font-size:11.5px;margin-bottom:6px">${esc(L(ext, 'name'))}</div>
+            <div>${t('提取器脚本会以当前用户权限在本机运行，并且可以：')}</div>
             <ul style="margin:8px 0 0 18px;padding:0;line-height:1.7">
-              <li>读取、修改、删除你电脑上的<b>任何文件</b></li>
-              <li>访问网络、上传数据</li>
-              <li>执行任意系统命令</li>
+              <li>${t('读取、修改、删除你电脑上的任何文件')}</li>
+              <li>${t('访问网络、上传数据')}</li>
+              <li>${t('执行任意系统命令')}</li>
             </ul>
           </div>
           <div style="font-size:12.5px;color:var(--muted);line-height:1.7">
-            请只运行<b>你自己写的</b>或<b>来源可信</b>的提取器。
-            本工具不对提取器的行为做任何限制或担保，
-            <b style="color:var(--warn)">因执行提取器产生的一切后果由使用者自行承担</b>。
+            <div>${t('请只运行你自己写的或来源可信的提取器。')}</div>
+            <div>${t('本工具不对提取器的行为做任何限制或担保。')}</div>
+            <div style="color:var(--warn);font-weight:600">${t('因执行提取器产生的一切后果由使用者自行承担。')}</div>
           </div>
+          ${ext.sends_samples ? `
+          <div class="notice" style="margin-top:12px;font-size:12.5px;line-height:1.7">
+            <div>${t('本次动作会把该目录下若干文件的内容片段发送给你配置的模型供应商，用于理解数据格式。')}</div>
+            <div>${t('凭据与运行数据类文件（.env、settings.json、数据库、日志、私钥等）不会被读取，片段里的密钥形态串也会先被抹除。')}</div>
+          </div>` : ''}
           <label class="switch" style="margin-top:14px">
             <input type="checkbox" id="risk_ok">
-            <span>我已阅读并了解上述风险，确认执行</span>
+            <span>${t('我已阅读并了解上述风险，确认执行')}</span>
           </label>
         </div>
         <div class="modal-foot">
           <div class="spacer"></div>
-          <button class="btn" id="risk_cancel">取消</button>
-          <button class="btn danger" id="risk_go" disabled>请阅读（5s）</button>
+          <button class="btn" id="risk_cancel">${t('取消')}</button>
+          <button class="btn danger" id="risk_go" disabled>${countdownText(5)}</button>
         </div>
       </div>`;
     document.body.appendChild(el);
@@ -1791,11 +1843,11 @@ function confirmRisk(ext) {
     const timer = setInterval(() => {
       left -= 1;
       if (left > 0) {
-        go.textContent = `请阅读（${left}s）`;
+        go.textContent = countdownText(left);
         return;
       }
       clearInterval(timer);
-      go.textContent = '确认执行';
+      go.textContent = t('确认执行');
       go.disabled = !chk.checked;
     }, 1000);
 
@@ -1819,35 +1871,35 @@ function agentScriptDialog(mode, ext, main) {
   el.innerHTML = `
     <div class="modal-box" style="width:min(680px,94vw)">
       <div class="modal-head">
-        <b>${isGen ? '让 Agent 写一个提取器' : '让 Agent 改进提取器'}</b>
+        <b>${isGen ? t('让 Agent 写一个提取器') : t('让 Agent 改进提取器')}</b>
         ${isGen ? '' : `<span class="mono dim">${esc(ext.id)}</span>`}
       </div>
       <div class="modal-body">
         <div class="formrow">
-          <label class="lbl">游戏目录（Agent 要读这里的文件）</label>
+          <label class="lbl">${t('游戏目录（Agent 要读这里的文件）')}</label>
           <input class="field" id="ag_game" placeholder="例如 D:\\Games\\MyGame"
                  value="${esc((($('#x_game') || {}).value || '').trim())}">
         </div>
         <div class="formrow">
-          <label class="lbl">${isGen ? '额外要求（可选）' : '想改进什么（可选）'}</label>
+          <label class="lbl">${isGen ? t('额外要求（可选）') : t('想改进什么（可选）')}</label>
           <textarea class="field" id="ag_hint" rows="3"
             placeholder="${isGen
               ? '例如：只抽对话，不要物品名；编码是 GBK'
               : '例如：漏了 Map 里的对话；把纯数字过滤掉'}"></textarea>
         </div>
         <div class="notice" style="font-size:12px">
-          ${isGen
-            ? 'Agent 会先画像目录、采样文件内容，再生成 <code>extractor.yaml</code> 与 <code>run.py</code>，然后<b>自动试跑一次</b>并把校验结果给你看。'
-            : 'Agent 会看现有脚本、上次运行日志和你写的反馈，生成改进版（<b>旧脚本会备份</b>到 <code>.backup/</code>），然后自动试跑。'}
-          生成的脚本会被限制在「读文件 + 写 JSONL」范围内（禁止 subprocess / socket / eval 等），但仍会以当前用户权限执行。
+          <div>${isGen
+            ? t('Agent 会先画像目录、采样文件内容，再生成 extractor.yaml 与 run.py，然后自动试跑一次并把校验结果给你看。')
+            : t('Agent 会看现有脚本、上次运行日志和你写的反馈，生成改进版（旧脚本会备份到 .backup/ 目录），然后自动试跑。')}</div>
+          <div style="margin-top:6px">${t('生成的脚本会被限制在「读文件 + 写 JSONL」范围内（禁止 subprocess / socket / eval 等），但仍会以当前用户权限执行。')}</div>
         </div>
         <div id="ag_out"></div>
       </div>
       <div class="modal-foot">
         <span class="dim" id="ag_msg" style="font-size:11.5px"></span>
         <div class="spacer"></div>
-        <button class="btn" id="ag_cancel">关闭</button>
-        <button class="btn primary" id="ag_go">${isGen ? '开始生成' : '开始改进'}</button>
+        <button class="btn" id="ag_cancel">${t('关闭')}</button>
+        <button class="btn primary" id="ag_go">${isGen ? t('开始生成') : t('开始改进')}</button>
       </div>
     </div>`;
   document.body.appendChild(el);
@@ -1899,8 +1951,10 @@ function agentScriptDialog(mode, ext, main) {
     if (!gameDir) return toast('先填游戏目录', true);
     const hint = ($('#ag_hint', el).value || '').trim();
 
+    // 生成/改进都要把目录样例发给模型，风险确认里必须写明这一条
     const agreed = await confirmRisk(
-      isGen ? { name: 'Agent 生成的脚本' } : ext
+      isGen ? { name: 'Agent 生成的脚本', sends_samples: true }
+            : { ...(ext || {}), sends_samples: true }
     );
     if (!agreed) return;
 
@@ -2181,7 +2235,9 @@ function bindExtractRun(main, x) {
   const del = $('#delExtractor');
   if (del) {
     del.onclick = async () => {
-      if (!confirm(`删除提取器「${x.name}」？`)) return;
+      if (!(await askConfirm(isEn()
+        ? `Delete extractor "${L(x, 'name')}"?`
+        : `删除提取器「${x.name}」？`))) return;
       try {
         await api('DELETE', `/api/extractors/${encodeURIComponent(x.id)}`);
         toast('已删除');
@@ -3042,7 +3098,9 @@ async function renderPrompts(main) {
     } catch (e) { toast(e.message, true); }
   };
   $('#resetAll').onclick = async () => {
-    if (!confirm(`把 ${(d.tasks || []).length} 个环节与总前置全部恢复默认？`)) return;
+    if (!(await askConfirm(isEn()
+      ? `Reset all ${(d.tasks || []).length} stages and the global prefix to defaults?`
+      : `把 ${(d.tasks || []).length} 个环节与总前置全部恢复默认？`))) return;
     try {
       await api('POST', '/api/prompts/reset', {});
       toast('已全部恢复默认');
@@ -3160,7 +3218,7 @@ async function renderExtensions(main) {
   main.querySelectorAll('[data-del]').forEach((b) => {
     b.onclick = async () => {
       const [kind, id] = b.dataset.del.split('|');
-      if (!confirm(`确定移除 ${kind}「${id}」？`)) return;
+      if (!(await askConfirm(isEn() ? `Remove ${kind} "${id}"?` : `确定移除 ${kind}「${id}」？`))) return;
       try {
         await api('DELETE', `/api/extensions/${kind}/${encodeURIComponent(id)}`);
         toast('已移除');

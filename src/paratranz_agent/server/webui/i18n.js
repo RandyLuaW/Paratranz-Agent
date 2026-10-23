@@ -179,17 +179,18 @@ function applyLang(lang, rerender) {
 /* 异步渲染兜底：多数渲染器在 await 之后才写 DOM，render() 末尾那一次翻译
  * 抓不到晚到的节点（概览的「最近任务」、日志流、toast 都是这样）。
  * 用一个 MutationObserver 观察新增节点，攒到下一帧统一翻一遍。
- * 只监听 childList：我们改的是文本节点的值，不会再次触发，天然不会自激。 */
+ * 观察根是 `document.body`：弹窗（`.modal`）是**动态挂到 body 上**的，
+ * 只观察 `#main` 那几个容器时弹窗永远翻不到（实测：风险确认弹窗整段中文）。 */
 let _i18nBusy = false;
 let _i18nObserver = null;
 
 function startI18nWatcher() {
   if (!isEn() || !window.MutationObserver || _i18nObserver) return;
-  const targets = ['#main', '#nav', '.topbar', '#logPanel', '#toast'];
+  const targets = ['#main', '#nav', '.topbar', '#logPanel', '#toast', '.modal'];
   const translateAll = () => {
     for (let i = 0; i < targets.length; i++) {
-      const el = document.querySelector(targets[i]);
-      if (el) translateDom(el);
+      const els = document.querySelectorAll(targets[i]);
+      for (let j = 0; j < els.length; j++) translateDom(els[j]);
     }
   };
   _i18nObserver = new MutationObserver(() => {
@@ -207,8 +208,6 @@ function startI18nWatcher() {
     // 无头浏览器里切页后整页停在中文）。所以始终挂一个定时器兜底。
     setTimeout(run, 50);
   });
-  for (let i = 0; i < targets.length; i++) {
-    const el = document.querySelector(targets[i]);
-    if (el) _i18nObserver.observe(el, { childList: true, subtree: true });
-  }
+  const root = document.body;
+  if (root) _i18nObserver.observe(root, { childList: true, subtree: true });
 }
