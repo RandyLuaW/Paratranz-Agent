@@ -1,6 +1,6 @@
 [project]
 name = "paratranz-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agent-driven automation for ParaTranz localization projects: task planning, MT, review, glossary, style guide"
 requires-python = ">=3.11"
 dependencies = [

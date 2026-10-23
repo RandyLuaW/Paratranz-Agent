@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import __version__
 from . import routes
 from .deps import Deps
 from .jobs import EventBus, JobRunner
@@ -74,7 +75,7 @@ def create_app(
 
     app = FastAPI(
         title="paratranz-agent",
-        version="0.2.0",
+        version=__version__,
         docs_url="/api/docs",
         lifespan=lifespan,
     )
