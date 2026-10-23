@@ -7,11 +7,12 @@
 **让 LLM Agent 接管 ParaTranz 汉化项目的全流程 —— 分派、翻译、校对、术语、规范，以及「游戏文件 ↔ 平台」的双向链路。**
 
 [![CI](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/RandyLuaW/Paratranz-Agent?color=76bad9)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#)
 
-简体中文 ｜ [WebUI 说明](WebUI说明.md)
+简体中文 ｜ [WebUI 说明](WebUI说明.md) ｜ [**下载 Windows 免安装包**](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
 
 </div>
 
@@ -97,7 +98,24 @@
 
 ## 🏁 快速开始
 
-### 1. 安装
+### 方式一：Windows 免安装包（不写代码就用这个）
+
+到 [**Releases**](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest) 下载
+`paratranz-agent-x.y.z-win64.zip`，解压到任意目录（路径含中文、空格都行），然后：
+
+| 双击 | 作用 |
+| --- | --- |
+| **`web.bat`** | 打开可视化控制台，浏览器自动打开 `http://127.0.0.1:8787` |
+| **`ptz.bat`** | 命令行（等价于 `ptz`，参数照传，如 `ptz.bat status`） |
+
+**不需要装 Python，也不需要联网装依赖**——包里自带官方 Python 运行时和全部依赖，约 21 MB。
+
+- 想先看看界面：`web.bat --mock`（内置假平台，完整演示五条流水线，不碰真实项目）
+- 数据都在解压目录的 `.ptz-state\` 里（Token、Key、任务与提取记录）；备份就复制这个文件夹，换机器带走即可
+- 卸载 = 删掉文件夹，不写注册表、不装服务
+- 包里附带 `快速上手.txt`，写了首次配置、常见问题与卸载
+
+### 方式二：从源码安装
 
 ```bash
 git clone https://github.com/RandyLuaW/Paratranz-Agent.git
@@ -107,19 +125,14 @@ python -m venv .venv
 pip install -e .
 ```
 
-需要 Python ≥ 3.11。
-
-### 2. 启动控制台
+需要 Python ≥ 3.11。然后：
 
 ```bash
 ptz serve            # 打开 http://127.0.0.1:8787
+ptz serve --mock     # 没有 Token 也能看的演示模式
 ```
 
-Windows 上也可以双击 `web.bat`。**没有 Token 也想先看看？**
-
-```bash
-ptz serve --mock     # 内置假平台，完整演示五条流水线，不碰真实项目
-```
+Windows 上也可以直接双击仓库里的 `web.bat`。
 
 ### 3. 填两样东西
 
