@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..llm import BaseLLM, LLMError, extract_json
+from ..llm import BaseLLM, LLMError, build_messages, extract_json
 
 # 关键词 → 工具。顺序即优先级（同一句里命中多个时按此顺序排）
 RULES: list[tuple[str, tuple[str, ...]]] = [
@@ -102,14 +102,9 @@ def llm_plan(
         if t["name"] not in ("qa_check",)
     )
     try:
+        system = (system_prompt.strip() or AGENT_SYSTEM).format(tools=catalog)
         raw = llm.chat(
-            [
-                {
-                    "role": "system",
-                    "content": (system_prompt.strip() or AGENT_SYSTEM).format(tools=catalog),
-                },
-                {"role": "user", "content": text},
-            ],
+            build_messages(system, text),
             json_mode=True,
         )
         data = extract_json(raw)

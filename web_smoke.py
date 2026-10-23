@@ -986,9 +986,10 @@ def main() -> int:
               c.get("/api/project").json()["progress"]["total"] == before)
 
         # 真导入（走 job：按平台语义逐条 POST /strings）
+        # 注意：正式导入只提交 job，条数由任务结果给出（路由不再自己 prep 一遍）
         imp = c.post(f"/api/extractions/{jid_x}/import",
                      json={"file_id": 1, "filename": "x.json"})
-        check("提交导入任务", imp.status_code == 200 and imp.json()["sent"] >= 3,
+        check("提交导入任务", imp.status_code == 200 and bool(imp.json().get("job")),
               imp.text[:80])
         imp_job = wait_job(c, imp.json()["job"]["id"])
         check("导入任务完成", imp_job["status"] == "done", str(imp_job.get("error"))[:80])

@@ -11,13 +11,12 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import re
 from collections import Counter
 from typing import TYPE_CHECKING, Sequence
 
 from ..config import AgentConfig
-from ..llm import BaseLLM, LLMError, LLMNotConfigured, extract_json
+from ..llm import BaseLLM, LLMError, LLMNotConfigured, build_messages, extract_json
 from ..models import FileItem
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -100,10 +99,7 @@ class StyleGuidePipeline:
         }
         try:
             raw = self.llm.chat(
-                [
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
+                build_messages(self.system_prompt, payload),
                 json_mode=True,
             )
             data = extract_json(raw)

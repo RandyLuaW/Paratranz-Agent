@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from ..llm import BaseLLM, extract_json
+from ..llm import BaseLLM, build_messages, extract_json
 from .extraction import (
     ExtractionError,
     ExtractorMeta,
@@ -261,8 +261,7 @@ def generate(
     if on_log:
         on_log("让模型生成脚本…")
     raw = llm.chat(
-        [{"role": "system", "content": SYSTEM_PROMPT},
-         {"role": "user", "content": user}],
+        build_messages(SYSTEM_PROMPT, user),
         json_mode=True,
     )
     data = _parse_generated(raw)
@@ -316,8 +315,7 @@ def improve(
     if on_log:
         on_log("让模型改进 " + eid + "…")
     raw = llm.chat(
-        [{"role": "system", "content": SYSTEM_PROMPT},
-         {"role": "user", "content": user}],
+        build_messages(SYSTEM_PROMPT, user),
         json_mode=True,
     )
     data = _parse_generated(raw, require_id=eid)

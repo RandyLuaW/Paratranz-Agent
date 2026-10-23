@@ -21,13 +21,13 @@
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from ..config import AgentConfig
-from ..llm import BaseLLM, LLMError, LLMNotConfigured, extract_json
+from ..llm import BaseLLM, LLMError, LLMNotConfigured, build_messages, extract_json
 from ..models import Stage, StringItem
 from ..qa import Issue, QAReport, Severity, run_qa
 
@@ -195,14 +195,11 @@ class ReviewPipeline:
         return out
 
     # ------------------------------------------------------------------ 二审
-    def _build_messages(self, batch: Sequence[StringItem]) -> list[dict]:
-        terms = self.store.term_all()
-        joined = "\n".join(s.original for s in batch)
-        glossary = [
-            {"term": t, "translation": m["translation"]}
-            for t, m in terms.items()
-            if t in joined or any(v and v in joined for v in (m.get("variants") or []))
-        ][:40]
+    def _build_messages(
+        self, batch: Sequence[StringItem], *, terms: dict[str, dict]
+    ) -> list[dict]:
+        # terms 由 run() 取一次传进来：术语表全表读不能按批重复
+        glossary = self.store.glossary_for([s.original for s in batch], terms=terms, limit=40)
         payload = {
             "task": "review",
             "style": self.cfg.project.style,
@@ -217,14 +214,13 @@ class ReviewPipeline:
                 for s in batch
             ],
         }
-        return [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ]
+        return build_messages(self.system_prompt, payload)
 
-    def _second_pass(self, batch: Sequence[StringItem]) -> dict[int, tuple[str, str]]:
+    def _second_pass(
+        self, batch: Sequence[StringItem], *, terms: dict[str, dict]
+    ) -> dict[int, tuple[str, str]]:
         try:
-            raw = self.llm.chat(self._build_messages(batch), json_mode=True)
+            raw = self.llm.chat(self._build_messages(batch, terms=terms), json_mode=True)
             data = extract_json(raw)
         except LLMNotConfigured:
             raise
@@ -267,7 +263,8 @@ class ReviewPipeline:
         comment_on_fail = bool(getattr(cfg, "comment_on_fail", False))
         reset_empty = bool(getattr(cfg, "reset_empty", False))
 
-        glossary = self.store.term_all()
+        # 术语表只取一次：QA 与每批 prompt 的 glossary 共用同一份快照
+        terms = self.store.term_all()
         block_on = Severity.parse(cfg.block_on)
 
         dispute_ids: list[int] = []
@@ -306,7 +303,7 @@ class ReviewPipeline:
             rep = run_qa(
                 s.original,
                 s.translation,
-                terms=glossary,
+                terms=terms,
                 block_on=block_on,
                 length_ratio_limit=cfg.length_ratio_limit,
                 ascii_ratio_limit=cfg.ascii_ratio_limit,
@@ -344,7 +341,7 @@ class ReviewPipeline:
 
             results = self.llm.map_concurrent(
                 batches,
-                self._second_pass,
+                partial(self._second_pass, terms=terms),
                 concurrency=self.cfg.llm.concurrency,
                 on_done=_progress,
             )

@@ -10,14 +10,13 @@
 """
 from __future__ import annotations
 
-import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Sequence
 
 from ..config import AgentConfig
-from ..llm import BaseLLM, LLMError, LLMNotConfigured, extract_json
+from ..llm import BaseLLM, LLMError, LLMNotConfigured, build_messages, extract_json
 from ..models import Stage, StringItem
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -208,10 +207,7 @@ class GlossaryPipeline:
         }
         try:
             raw = self.llm.chat(
-                [
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
+                build_messages(self.system_prompt, payload),
                 json_mode=True,
             )
             data = extract_json(raw)
@@ -310,10 +306,7 @@ class GlossaryPipeline:
         }
         try:
             raw = self.llm.chat(
-                [
-                    {"role": "system", "content": RESOLVE_SYSTEM},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
+                build_messages(RESOLVE_SYSTEM, payload),
                 json_mode=True,
             )
             data = extract_json(raw)

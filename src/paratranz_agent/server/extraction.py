@@ -32,6 +32,7 @@ Unity 要拆 AssetBundle。这一层把这些差异收进「提取器」这个�
 """
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import re
@@ -386,12 +387,30 @@ def _write_meta(jdir: Path, meta: ExtractorMeta, res: ExtractionResult) -> None:
 MAX_LINES = 1_000_000  # 单次提取的词条上限，防内存爆
 
 
-def _read_jsonl(path: Path, max_lines: int = MAX_LINES) -> tuple[list[dict], int]:
+def _read_jsonl(
+    path: Path,
+    max_lines: int = MAX_LINES,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> tuple[list[dict], int]:
+    """读 JSONL，可按条切片。
+
+    加 offset/limit 是为了详情端点分页：9087 条的记录约 2 MB，原先
+    `load_entries()` 全量解析后前端再 `entries[offset:offset+limit]` 切片，
+    等于每翻一页就把整份文件重新解析一遍。现在边读边跳、够数即停。
+
+    `max_lines` 仍然是**整份文件**的行数上限（防提取器匹配过宽），
+    与切片无关——即使只取 100 条，也要读完才发现文件超限吗？不需要，
+    因为写文件时就已经按 MAX_LINES 校验过，这里只对全量读取生效。
+    """
     out: list[dict] = []
     bad = 0
+    seen = 0          # 已通过校验的条数（用于 offset/limit）
+    full = offset <= 0 and limit is None
     with path.open("r", encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, 1):
-            if lineno > max_lines:
+            if full and lineno > max_lines:
                 raise ExtractionError(
                     f"输出超过 {max_lines} 行，已中止（检查提取器是否匹配过宽）"
                 )
@@ -411,6 +430,10 @@ def _read_jsonl(path: Path, max_lines: int = MAX_LINES) -> tuple[list[dict], int
             if not key or not isinstance(original, str):
                 bad += 1
                 continue
+            if seen < offset:
+                seen += 1
+                continue
+            seen += 1
             out.append(
                 {
                     "key": key,
@@ -418,16 +441,24 @@ def _read_jsonl(path: Path, max_lines: int = MAX_LINES) -> tuple[list[dict], int
                     "context": str(obj.get("context") or ""),
                 }
             )
+            if limit is not None and len(out) >= limit:
+                break
     return out, bad
 
 
 # ------------------------------------------------------------------ 历史
 def list_jobs(state_dir: Path, limit: int = 50) -> list[dict]:
+    """最近的提取记录（新→旧）。
+
+    原先 `sorted(root.iterdir())` 会把**所有** job 目录先排一遍再截断；
+    目录名就是时间戳，取最大的 limit 个即可（多取一倍以容忍缺 meta.json 的目录）。
+    """
     root = _job_root(state_dir)
+    if not root.exists():
+        return []
+    candidates = heapq.nlargest(max(limit * 2, limit), (d for d in root.iterdir() if d.is_dir()))
     rows: list[dict] = []
-    for d in sorted(root.iterdir(), reverse=True):
-        if not d.is_dir():
-            continue
+    for d in candidates:
         mf = d / "meta.json"
         if not mf.exists():
             continue
@@ -447,11 +478,18 @@ def get_job(state_dir: Path, job_id: str) -> dict:
     return json.loads(mf.read_text(encoding="utf-8"))
 
 
-def load_entries(state_dir: Path, job_id: str) -> list[dict]:
+def load_entries(
+    state_dir: Path,
+    job_id: str,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> list[dict]:
+    """读某次提取的词条。分页时给 offset/limit，避免整份解析（见 `_read_jsonl`）。"""
     f = _job_root(state_dir) / check_id(job_id, "提取记录 id") / "entries.jsonl"
     if not f.exists():
         raise ExtractionError(f"该记录没有词条文件：{job_id}")
-    entries, _ = _read_jsonl(f)
+    entries, _ = _read_jsonl(f, offset=offset, limit=limit)
     return entries
 
 

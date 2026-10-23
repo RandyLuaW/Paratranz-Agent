@@ -361,12 +361,55 @@ def tool_files(ctx: AppContext, *, job=None, runner=None, **_: Any) -> dict:
     return {"files": rows, "dirs": _dir_rollup(files)}
 
 
-def tool_plan(ctx: AppContext, *, job=None, runner=None, dry_run: bool | None = None, **_: Any) -> dict:
+# ------------------------------------------------- 五个流水线的公共编排
+# 原先每个工具都重写一遍「闸门 + 预算 + 参数默认 + 构造流水线」。
+# 前两件是所有写操作都必须做的，后两件只是取值，集中到这里；
+# 各环节真正的差异（取材、执行、回收结果）留在各自的工具函数里。
+_PIPELINES: dict[str, tuple[type, bool]] = {
+    "plan": (PlanPipeline, False),
+    "translate": (TranslatePipeline, True),
+    "review": (ReviewPipeline, True),
+    "glossary": (GlossaryPipeline, True),
+    "styleguide": (StyleGuidePipeline, True),
+}
+
+
+def _preflight(ctx: AppContext, job, runner) -> None:
+    """写操作前的统一检查：凭据与演练模式（`_guard`）+ 预算（`_budget_guard`）。"""
     _guard(ctx)
     _budget_guard(ctx, job, runner)
-    cfg = ctx.cfg
-    dry = cfg and (ctx.settings.dry_run if dry_run is None else dry_run)
-    pipe = PlanPipeline(ctx.client, cfg, ctx.store)
+
+
+def _pipeline(ctx: AppContext, kind: str):
+    """按环节构造流水线。
+
+    这三项必须**成套**出现：给哪个任务选模型（`llm_for`）、用哪套配置（`cfg_for`）、
+    注入哪段提示词（`prompt_for`）。原先在四个工具里各写一遍——漏改一处，
+    那个环节就会悄悄退回默认模型而没人发现。集中到这里，想漏也漏不了。
+    """
+    cls, needs_llm = _PIPELINES[kind]
+    if not needs_llm:
+        return cls(ctx.client, ctx.cfg, ctx.store)
+    return cls(
+        ctx.client, ctx.cfg_for(kind), ctx.store, ctx.llm_for(kind),
+        system_prompt=ctx.settings.prompt_for(kind),
+    )
+
+
+def _limit_of(ctx: AppContext, kw: dict) -> int:
+    """单次运行条数上限：显式传参 > 设置页默认值。"""
+    return kw.get("limit") or ctx.settings.per_run_limit
+
+
+def _dry_of(ctx: AppContext, kw: dict) -> bool:
+    """是否演练：显式传参 > 设置页默认值。"""
+    return ctx.settings.dry_run if kw.get("dry_run") is None else bool(kw["dry_run"])
+
+
+def tool_plan(ctx: AppContext, *, job=None, runner=None, dry_run: bool | None = None, **_: Any) -> dict:
+    _preflight(ctx, job, runner)
+    dry = ctx.settings.dry_run if dry_run is None else dry_run
+    pipe = _pipeline(ctx, "plan")
     planned = pipe.build_plan()
     if job and runner:
         for p in planned:
@@ -381,21 +424,10 @@ def tool_plan(ctx: AppContext, *, job=None, runner=None, dry_run: bool | None = 
     }
 
 
-def _pipeline_kwargs(ctx: AppContext) -> dict:
-    s = ctx.settings
-    return {"limit": s.per_run_limit, "dry_run": s.dry_run}
-
-
 def tool_translate(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
-    _guard(ctx)
-    _budget_guard(ctx, job, runner)
-    s = ctx.settings
-    limit = kw.get("limit") or s.per_run_limit
-    dry = s.dry_run if kw.get("dry_run") is None else bool(kw["dry_run"])
-    pipe = TranslatePipeline(
-        ctx.client, ctx.cfg_for("translate"), ctx.store, ctx.llm_for("translate"),
-        system_prompt=ctx.settings.prompt_for("translate"),
-    )
+    _preflight(ctx, job, runner)
+    limit, dry = _limit_of(ctx, kw), _dry_of(ctx, kw)
+    pipe = _pipeline(ctx, "translate")
     if job and runner:
         runner.log(job, f"拉取未翻译词条，上限 {limit} 条")
     stats = pipe.run(limit=limit, dry_run=dry)
@@ -406,15 +438,9 @@ def tool_translate(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict
 
 
 def tool_review(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
-    _guard(ctx)
-    _budget_guard(ctx, job, runner)
-    s = ctx.settings
-    limit = kw.get("limit") or s.per_run_limit
-    dry = s.dry_run if kw.get("dry_run") is None else bool(kw["dry_run"])
-    pipe = ReviewPipeline(
-        ctx.client, ctx.cfg_for("review"), ctx.store, ctx.llm_for("review"),
-        system_prompt=ctx.settings.prompt_for("review"),
-    )
+    _preflight(ctx, job, runner)
+    limit, dry = _limit_of(ctx, kw), _dry_of(ctx, kw)
+    pipe = _pipeline(ctx, "review")
     stats = pipe.run(limit=limit, dry_run=dry, include_disputed=bool(kw.get("include_disputed")))
     if job and runner:
         tag = "（演练模式：未改 stage）" if dry else ""
@@ -425,14 +451,9 @@ def tool_review(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
 
 
 def tool_glossary(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
-    _guard(ctx)
-    _budget_guard(ctx, job, runner)
-    s = ctx.settings
-    dry = s.dry_run if kw.get("dry_run") is None else bool(kw["dry_run"])
-    pipe = GlossaryPipeline(
-        ctx.client, ctx.cfg_for("glossary"), ctx.store, ctx.llm_for("glossary"),
-        system_prompt=ctx.settings.prompt_for("glossary"),
-    )
+    _preflight(ctx, job, runner)
+    dry = _dry_of(ctx, kw)
+    pipe = _pipeline(ctx, "glossary")
     cands = pipe.build()
     if job and runner:
         runner.log(job, f"抽取到 {len(cands)} 个候选术语")
@@ -443,14 +464,9 @@ def tool_glossary(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
 
 
 def tool_styleguide(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
-    _guard(ctx)
-    _budget_guard(ctx, job, runner)
-    s = ctx.settings
-    dry = s.dry_run if kw.get("dry_run") is None else bool(kw["dry_run"])
-    pipe = StyleGuidePipeline(
-        ctx.client, ctx.cfg_for("styleguide"), ctx.store, ctx.llm_for("styleguide"),
-        system_prompt=ctx.settings.prompt_for("styleguide"),
-    )
+    _preflight(ctx, job, runner)
+    dry = _dry_of(ctx, kw)
+    pipe = _pipeline(ctx, "styleguide")
     md = pipe.build(with_llm=bool(kw.get("with_llm", True)))
     res = pipe.publish(md, dry_run=dry)
     if job and runner and dry:
@@ -459,9 +475,11 @@ def tool_styleguide(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dic
 
 
 def tool_run(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
-    """全流程：分派 → 翻译 → 校对 → 术语 → 规范。"""
-    _guard(ctx)
-    _budget_guard(ctx, job, runner)
+    """全流程：分派 → 翻译 → 校对 → 术语 → 规范。
+
+    这里**不再**做闸门与预算检查：下面每一步调用的工具自己会做（`_preflight`）。
+    再多挡一遍只会让预算事件被重复记 6 次，日志里看不出真实原因。
+    """
     out: dict[str, Any] = {}
     steps = [
         ("plan", tool_plan),

@@ -165,17 +165,16 @@ def pull_translations(
 
 
 def default_writers() -> list[Any]:
-    """按优先级返回可用写回器；行号写回器缺失也不影响 JSON 路径族。"""
+    """两个写回器：JSON 路径族与行号族。
+
+    原来这里用 `try: from .line import LineWriter / except ImportError: pass`——
+    那是分模块开发期留下的兜底，`line.py` 早就是包内固定模块，捕获它只会
+    把「行号写回悄悄消失」变成静默降级。缺了就应该炸。
+    """
     from .json_path import JsonPathWriter
+    from .line import LineWriter
 
-    writers: list[Any] = [JsonPathWriter()]
-    try:
-        from .line import LineWriter
-
-        writers.append(LineWriter())
-    except ImportError:  # pragma: no cover - 分模块开发期
-        pass
-    return writers
+    return [JsonPathWriter(), LineWriter()]
 
 
 # --------------------------------------------------------------------- 主流程

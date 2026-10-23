@@ -228,6 +228,40 @@ class Store:
             out[d["term"]] = d
         return out
 
+    def glossary_for(
+        self,
+        texts: Sequence[str],
+        *,
+        terms: dict[str, dict] | None = None,
+        limit: int = 40,
+        with_pos: bool = False,
+    ) -> list[dict]:
+        """筛出「出现在这批原文里」的术语，供 prompt 使用。
+
+        两处调用（翻译、校对）原先各自实现了一遍同样的过滤逻辑，合并到这里；
+        `with_pos` 只有翻译侧需要。
+
+        **`terms` 参数是为了避免长任务里的重复全表读**：`term_all()` 每次都要
+        `SELECT * FROM term` 并重建字典，而 prompt 是按批构造的——
+        9087 条 ÷ 40 条/批 = 227 次调用。调用方应在 run() 开头取一次再传进来。
+        """
+        pool = self.term_all() if terms is None else terms
+        if not pool:
+            return []
+        joined = "\n".join(texts)
+        hits: list[dict] = []
+        for term, meta in pool.items():
+            variants = [term, *(meta.get("variants") or [])]
+            if not any(v and v in joined for v in variants):
+                continue
+            row = {"term": term, "translation": meta["translation"]}
+            if with_pos:
+                row["pos"] = meta.get("pos") or ""
+            hits.append(row)
+            if len(hits) >= limit:
+                break
+        return hits
+
     def term_commit(self) -> None:
         with self._lock:
             self.db.commit()

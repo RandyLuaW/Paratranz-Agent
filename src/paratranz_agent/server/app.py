@@ -879,13 +879,16 @@ def create_app(
 
         try:
             meta = get_job(ctx.state_dir, jid)
-            entries = load_entries(ctx.state_dir, jid)
+            # 只读这一页：原先全量解析 entries.jsonl 再切片，
+            # 9087 条的记录约 2 MB，每翻一页就白解析一遍
+            entries = load_entries(ctx.state_dir, jid, offset=offset, limit=limit)
         except ExtractionError as exc:
             raise HTTPException(404, str(exc)) from exc
         return {
             "meta": meta,
-            "entries": entries[offset: offset + limit],
-            "total": len(entries),
+            "entries": entries,
+            # 总条数取自 meta（提取完成时就写好了），不必为此再读一遍文件
+            "total": int(meta.get("entries") or 0) or len(entries),
             "log": job_log(ctx.state_dir, jid),
         }
 
@@ -926,8 +929,11 @@ def create_app(
     def import_extraction(jid: str, body: dict) -> dict:
         """导入提取结果到平台文件。
 
-        平台语义：translation 接口只更新已有词条，新增要走 POST /strings（逐条）。
-        所以真正导入走 job（可能几百条、受限流），dry_run 仍同步返回预览。
+        两条路，职责分明：
+        - **预览**（`dry_run`）就地算一遍：校验报告 + 按平台现状算新增/跳过 + 前 20 条样例；
+        - **正式导入**只校验参数并提交 job —— 取材/校验/写入全部由工具
+          `extraction_import` 做一次。原先这里也跑了 load→validate→normalize→export，
+          于是同一次导入把 entries.jsonl 解析两遍、校验两遍，纯属重复。
         """
         from .extraction import (
             ExtractionError,
@@ -942,11 +948,24 @@ def create_app(
         if not file_id:
             raise HTTPException(400, "选择目标文件")
         filename = str(body.get("filename") or "extract.json")
+
+        if not body.get("dry_run"):
+            ctx.guard()
+            job = runner.submit(
+                "extraction_import",
+                {"extraction_id": jid, "file_id": int(file_id),
+                 "force": bool(body.get("force"))},
+            )
+            ctx.logs.add(
+                "导入 " + jid + " 到文件 " + str(file_id) + "（job " + job.id + "）",
+                source="extract",
+            )
+            return {"ok": True, "job": job.as_dict(), "filename": filename}
+
         try:
             entries = load_entries(ctx.state_dir, jid)
         except ExtractionError as exc:
             raise HTTPException(404, str(exc)) from exc
-
         # 先校验**原始**数据：normalize 会去重，先归并就再也发现不了 dup_key
         report = validate(entries)
         if report["errors"] and not body.get("force"):
@@ -957,35 +976,25 @@ def create_app(
         merged, _ = normalize(entries)
         items = export_paratranz(merged)
 
-        if body.get("dry_run"):
-            # 预览：不提交，只回显将要发送的内容（并按平台现状算出新增/跳过）
-            try:
-                existing = ctx.client.existing_keys(int(file_id))
-                to_create = [it for it in items if it["key"] not in existing]
-            except Exception:  # noqa: BLE001 - 预览时平台不可达也不该失败
-                existing, to_create = set(), items
-            return {
-                "ok": True,
-                "dry_run": True,
-                "count": len(to_create),
-                "already": len(items) - len(to_create),
-                "sample": to_create[:20],
-                "report": report,
-                "filename": filename,
-                "file_id": int(file_id),
-            }
-
-        ctx.guard()
-        job = runner.submit(
-            "extraction_import",
-            {"extraction_id": jid, "file_id": int(file_id),
-             "force": bool(body.get("force"))},
-        )
-        ctx.logs.add(
-            "导入 " + str(len(items)) + " 条到文件 " + str(file_id) + "（job " + job.id + "）",
-            source="extract",
-        )
-        return {"ok": True, "job": job.as_dict(), "sent": len(items), "filename": filename}
+        try:
+            existing = ctx.client.existing_keys(int(file_id))
+        except Exception as exc:  # noqa: BLE001 - 平台不可达要明确报错
+            # 以前这里是 `existing, to_create = set(), items`，平台一挂就显示
+            # 「将发送全部 N 条」——把失败伪装成成功预览。宁可报错。
+            raise HTTPException(
+                502, "读取平台现有词条失败，无法给出准确预览：" + str(exc)
+            ) from exc
+        to_create = [it for it in items if it["key"] not in existing]
+        return {
+            "ok": True,
+            "dry_run": True,
+            "count": len(to_create),
+            "already": len(items) - len(to_create),
+            "sample": to_create[:20],
+            "report": report,
+            "filename": filename,
+            "file_id": int(file_id),
+        }
 
     @app.post("/api/extract/analyze")
     def analyze_dir(body: dict) -> dict:

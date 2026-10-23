@@ -88,6 +88,28 @@ def extract_json(text: str) -> Any:
     raise LLMError(f"无法从模型输出解析 JSON: {text[:300]}")
 
 
+def build_messages(system: str, payload: Any) -> list[dict]:
+    """组装 OpenAI 兼容的 system + user 消息。
+
+    所有环节都是「system 给规则，user 给 JSON 载荷」这一种形状，原先在 7 个模块里
+    各写了一遍（`[{"role":"system"...},{"role":"user", json.dumps(payload)}]`）。
+    统一到这里之后，将来要加 system 缓存标记、加 tool_calls、换协议都只改这一处。
+
+    `payload` 传 str 视为已序列化（少数环节直接给文本）。
+    中文不转义：`ensure_ascii=True` 会把每个汉字变成 6 字节的 `\\uXXXX`，
+    在这些 payload 上实测能让输入 token 翻 2~3 倍，纯属浪费。
+
+    system 原样透传（**不做 strip**）：调用方各自构造的 system 可能带尾随换行
+    （如 `extractor_agent.SYSTEM_PROMPT`），这里再处理一次就等于把 prompt
+    悄悄改了——重构不该顺手改提示词。
+    """
+    body = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    return [
+        {"role": "system", "content": system or ""},
+        {"role": "user", "content": body},
+    ]
+
+
 class BaseLLM:
     name = "base"
 

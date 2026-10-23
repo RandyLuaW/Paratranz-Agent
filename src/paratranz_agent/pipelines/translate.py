@@ -10,12 +10,12 @@
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Sequence
 
 from ..config import AgentConfig
-from ..llm import BaseLLM, LLMError, LLMNotConfigured
+from ..llm import BaseLLM, LLMError, LLMNotConfigured, build_messages
 from ..models import Stage, StringItem
 from ..qa import Severity, check_placeholders, run_qa
 
@@ -212,23 +212,15 @@ class TranslatePipeline:
         self.store.term_commit()
         return len(stale), ""
 
-    def _glossary_for(self, texts: Sequence[str], limit: int = 40) -> list[dict]:
+    def _glossary_for(
+        self, texts: Sequence[str], limit: int = 40, *, terms: dict[str, dict]
+    ) -> list[dict]:
         # enforce_terms=false 时不把术语塞进 prompt，让模型自由发挥
         # （校对阶段的 term_violation 仍会按术语表检查，只是不再强推）
         if not self.cfg.translate.enforce_terms:
             return []
-        terms = self.store.term_all()
-        if not terms:
-            return []
-        joined = "\n".join(texts)
-        hits = []
-        for term, meta in terms.items():
-            variants = [term, *(meta.get("variants") or [])]
-            if any(v and v in joined for v in variants):
-                hits.append(
-                    {"term": term, "translation": meta["translation"], "pos": meta.get("pos") or ""}
-                )
-        return hits[:limit]
+        # terms 由 run() 取一次传进来：术语表全表读不能按批重复 227 次
+        return self.store.glossary_for(texts, terms=terms, limit=limit, with_pos=True)
 
     # ------------------------------------------------------------------ 取材
     def _collect(
@@ -265,7 +257,9 @@ class TranslatePipeline:
         return out
 
     # ------------------------------------------------------------------ 翻译
-    def _build_messages(self, batch: list[StringItem]) -> list[dict]:
+    def _build_messages(
+        self, batch: list[StringItem], *, terms: dict[str, dict]
+    ) -> list[dict]:
         refs: list[dict] = []
         seen: set[str] = set()
         for s in batch:
@@ -282,7 +276,7 @@ class TranslatePipeline:
             "style": self.cfg.project.style,
             "source_lang": self.cfg.project.source_lang,
             "target_lang": self.cfg.project.target_lang,
-            "glossary": self._glossary_for([s.original for s in batch]),
+            "glossary": self._glossary_for([s.original for s in batch], terms=terms),
             "references": refs[:60],
             "items": [
                 {
@@ -293,10 +287,7 @@ class TranslatePipeline:
                 for s in batch
             ],
         }
-        return [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ]
+        return build_messages(self.system_prompt, payload)
 
     def _parse(self, raw: str) -> dict[int, str]:
         from ..llm import extract_json
@@ -316,14 +307,16 @@ class TranslatePipeline:
                 out[sid] = tr
         return out
 
-    def _translate_batch(self, batch: list[StringItem]) -> tuple[list[dict], list[dict], int]:
+    def _translate_batch(
+        self, batch: list[StringItem], *, terms: dict[str, dict]
+    ) -> tuple[list[dict], list[dict], int]:
         """单批翻译。返回 (待写入, 被拦样例, 失败条数)。
 
         刻意不在这里改 stats —— 线程池并发时共享累加会丢计数，
         统计由主线程按返回值合并。
         """
         try:
-            raw = self.llm.chat(self._build_messages(batch), json_mode=True)
+            raw = self.llm.chat(self._build_messages(batch, terms=terms), json_mode=True)
             mapping = self._parse(raw)
         except LLMNotConfigured:
             raise  # 配置错误必须冒泡，不能当成"这批失败了"
@@ -479,7 +472,9 @@ class TranslatePipeline:
         if not targets:
             return stats
 
-        glossary = self.store.term_all()
+        # 术语表只取一次：QA 与每批 prompt 的 glossary 共用同一份快照，
+        # 不再每批 term_all() 重读全表（9087 条 ÷ 40 条/批 = 227 次）
+        terms = self.store.term_all()
         todo: list[StringItem] = []
         writes: list[dict] = []
 
@@ -487,7 +482,7 @@ class TranslatePipeline:
         for s in targets:
             exact = self.store.tm_exact(s.original)
             if exact:
-                report = run_qa(s.original, exact, terms=glossary, block_on=Severity.ERROR)
+                report = run_qa(s.original, exact, terms=terms, block_on=Severity.ERROR)
                 if report.ok:
                     writes.append({"id": s.id, "translation": exact, "stage": int(Stage.TRANSLATED)})
                     stats.tm_hit += 1
@@ -500,7 +495,7 @@ class TranslatePipeline:
         stats.llm_batches = len(batches)
         results = self.llm.map_concurrent(
             batches,
-            self._translate_batch,
+            partial(self._translate_batch, terms=terms),
             concurrency=self.cfg.llm.concurrency,
         )
         for batch, res in zip(batches, results, strict=True):
