@@ -4,7 +4,7 @@
 
 # Paratranz Agent
 
-**让 LLM Agent 接管 ParaTranz 汉化项目的全流程 —— 分派、翻译、校对、术语、规范，以及「游戏文件 ↔ 平台」的双向链路。**
+**面向 ParaTranz 汉化项目的全流程 Agent 工具：分派、翻译、校对、术语、规范，以及「游戏文件 ↔ 平台」的双向链路。**
 
 [![CI](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/RandyLuaW/Paratranz-Agent?color=76bad9)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
@@ -18,34 +18,34 @@
 
 ---
 
-## ✨ 这是什么
+## ✨ 项目定位
 
-`ParaTranz` 上做汉化，真正耗时的从来不是"翻一条"，而是那些重复劳动：把几千条词条切成任务、盯着进度、逐条校对格式、维护术语表、写规范公告、最后再把译文一条条塞回游戏文件。
+汉化项目的主要成本并不在于单条译文的翻译，而在于随之而来的流程性工作：将数千条词条切分为任务、跟踪进度、逐条校对格式、维护术语表、撰写规范公告，最终再把译文逐条写回游戏文件。
 
-**Paratranz Agent** 把这些交给 Agent 做。它不是一个"批量上传工具"，而是一套**平台侧全流程自动化 + 本地文件双向同步**工具：一条命令起一个可视化控制台，你在界面里填 Token、点按钮、或者直接用中文下指令。
+**Paratranz Agent** 将上述流程交由 Agent 执行。本工具并非批量上传工具，而是一套**平台侧全流程自动化与本地文件双向同步**工具：以单条命令启动可视化控制台，可在界面中填写 Token、点击操作，或直接以自然语言下达指令。
 
-- **唯一的硬依赖**是 ParaTranz OpenAPI（不依赖任何第三方 SDK 或 MCP）
-- **零构建前端**：`pip install` 之后一条命令就能用，不需要 Node
-- **不模拟模型**：没配 API 就直接报错，不给你"看起来在跑其实没翻"的假象
-- **凭据只在本机**：Token / API Key 只写本地 `settings.json`，日志与错误信息全部脱敏
+- **唯一硬依赖**为 ParaTranz OpenAPI，不依赖任何第三方 SDK 或 MCP
+- **前端零构建**：安装后即可运行，无需 Node 环境
+- **不模拟模型**：未配置 API 时直接报错，不提供「看似运行、实则未翻译」的降级表现
+- **凭据仅存本机**：Token 与 API Key 只写入本地 `settings.json`，日志与错误信息统一脱敏
 
 ---
 
 ## 🚀 功能
 
-### 五条流水线（都可用 `ptz` 命令行或界面触发）
+### 五条流水线（可通过 `ptz` 命令行或界面触发）
 
-| 流水线 | 做什么 | 关键点 |
+| 流水线 | 职责 | 实现要点 |
 | --- | --- | --- |
-| **分派** `plan` | 按目录分片、按未翻译量装箱，生成带验收标准的任务说明 | 目录即分片单位；去重键不含可变计数，重跑不会建重复任务 |
-| **翻译** `translate` | 翻译记忆精确命中直出，其余分批送模型（带术语表 + TM 参考 + 风格） | 占位符不一致的**在本地就拦掉**，不写回平台 |
-| **校对** `review` | 9 类确定性 QA 规则先跑，`error` 直接打回；其余进 LLM 二审 | 判定 **fail-closed**：模型没明确说"通过"就不算通过 |
-| **术语** `glossary` | 模型从"原文 / 已定稿译文"句对抽术语，词频统计补位，批量导入 | 发布前先拉平台术语表，拉不到就放弃发布（不覆盖人工术语） |
-| **规范** `styleguide` | 由项目实际文件构成、进度、术语表、QA 规则集生成 markdown，发布为公告 | 同标题公告存在时更新而非新建 |
+| **分派** `plan` | 按目录分片、按未翻译量装箱，生成带验收标准的任务说明 | 以目录为分片单位；去重键不含可变计数，重复执行不产生重复任务 |
+| **翻译** `translate` | 翻译记忆精确命中时直接复用，其余分批提交模型（附术语表、TM 参考与风格要求） | 占位符不一致的条目在本地即拦截，不写回平台 |
+| **校对** `review` | 先执行 9 类确定性 QA 规则，`error` 级直接打回，其余交由 LLM 二审 | 判定采用 **fail-closed** 策略：模型未明确判定为通过时，不视为通过 |
+| **术语** `glossary` | 由模型从「原文 / 已定稿译文」句对中抽取术语，并以词频统计补充，批量导入 | 发布前先获取平台术语表，获取失败则放弃发布，避免覆盖人工维护的术语 |
+| **规范** `styleguide` | 依据项目实际文件构成、进度、术语表与 QA 规则集生成 Markdown，并发布为公告 | 存在同标题公告时执行更新而非新建 |
 
 ### 双向链路：游戏文件 ⇄ 平台
 
-这是它区别于"平台客户端"的地方 —— **提取**和**回写**共用同一套定位符：
+这是本工具区别于平台客户端的关键：**提取**与**回写**共用同一套定位符。
 
 ```
 游戏文件 ──提取器──▶ JSONL 词条 ──导入──▶ 平台 ──翻译/校对──▶ 确认译文
@@ -53,67 +53,67 @@
    └──────────────── 回写（按 key 回原位替换）◀──────────────────┘
 ```
 
-- **提取（Extraction）**：可插拔提取器协议（一个目录 = `extractor.yaml` + 入口脚本，JSONL 输出）。内置通用 JSON / 通用正则 / RPG Maker MV·MZ 三个，也能让 **Agent 现场读你的游戏目录、写一个提取器**并自动试跑。
-- **回写（Writeback）**：把平台上**达到门槛**（默认"已检查"）的确认译写回游戏文件，产出一份**完整可跑**的汉化版目录。
+- **提取（Extraction）**：采用可插拔提取器协议（一个目录对应 `extractor.yaml` 与入口脚本，输出 JSONL）。内置通用 JSON、通用正则、RPG Maker MV·MZ 三种；亦支持由 Agent 读取游戏目录、生成提取器并自动试跑。
+- **回写（Writeback）**：将平台上**达到门槛**（默认为「已检查」）的确认译文写回游戏文件，产出一个可直接运行的汉化版目录。
 
-**关键设计——key 就是定位符。** 提取时 key 编码了「文件相对路径 + 文件内位置」（`data/Actors.json::[12].name`、`Map001.json::ev3p0[45]`、`cfg/ui.txt::L123#1`），所以回写不需要重新理解游戏格式，按 key 回到原位替换即可。
+**关键设计：key 即定位符。** 提取阶段将「文件相对路径 + 文件内位置」编码进 key（如 `data/Actors.json::[12].name`、`Map001.json::ev3p0[45]`、`cfg/ui.txt::L123#1`），因此回写无需重新解析游戏格式，按 key 回到原位置替换即可。
 
-回写有**三条安全线**（宁可少写，不可错写）：
+回写设有**三条安全约束**（宁可不写，也不误写）：
 
-1. **原文校验** —— 文件里当前这段必须等于平台记录的原文，否则跳过并报「原文不一致」。游戏本体更新过之后 key 会整体错位，硬写就是毁数据。
-2. **默认不原地改** —— 产出到独立目录。默认 **整包镜像**：没改动的文件原样复制、改动文件直接写改写版，目标目录可直接替换游戏目录；也可以只输出被改动的文件。
-3. **原地改要显式授权 + 自动备份** —— 5 秒倒计时勾确认 + 后端 `accept_risk` 硬拦，备份落在状态目录（不放进游戏目录，否则下次提取会把备份当素材再扫一遍）并写 manifest。
+1. **原文校验**：文件中当前文本必须与平台记录的原文一致，否则跳过并报告「原文不一致」。游戏本体更新后 key 会整体错位，强行写入将损坏数据。
+2. **默认不原地修改**：产出至独立目录。默认采用**整包镜像**：未改动的文件原样复制，已改动的文件直接写入改写版本，目标目录可直接替换游戏目录；亦可仅输出被改动的文件。
+3. **原地修改需显式授权并自动备份**：需通过 5 秒倒计时确认与后端 `accept_risk` 强制校验；备份写入状态目录（不放入游戏目录，否则下次提取会把备份当作源文件重复扫描），并生成 manifest。
 
 ### 模型与成本
 
-- **多 provider 管理**：一个源可挂多个模型（中转站 / 聚合网关的常态），每个模型单独配参数，支持一键探测可用模型、逐模型连通性与延迟检查。
-- **按任务分配模型**：翻译 / 校对 / 术语 / 规范 / Agent / 提取器生成各自路由到不同模型，便宜任务用小模型。
-- **成本控制**：逐次调用记账 + 四维预算（单次 / 单任务 / 每日 / 每月），超限可只警告或直接拦。
+- **多 provider 管理**：单个源可挂载多个模型（适用于中转站、聚合网关等场景），每个模型可独立配置参数，支持一键探测可用模型、逐模型检测连通性与延迟。
+- **按任务分配模型**：翻译、校对、术语、规范、Agent、提取器生成各自路由至不同模型，低复杂度任务可分配小参数量模型。
+- **成本控制**：逐次调用记账，并提供四维预算（单次 / 单任务 / 每日 / 每月），超限时可选择仅告警或直接阻断。
 
-### 其它
+### 其他
 
-- **深色 / 浅色主题**，跟随系统或手动切换，两套都按对比度选过
-- **观测**：实时日志（SSE）、任务队列、用量与花费统计、数据页（词条 / TM / 术语 / 账本）
-- **扩展位**：插件 / SKILL / MCP 三栏管理（预留）
-- **提示词可改**：六个环节的 system prompt 都能在界面里替换，留空即用内置默认
+- **深色 / 浅色主题**：跟随系统或手动切换，两套配色均按对比度标准取值
+- **可观测性**：实时日志（SSE）、任务队列、用量与花费统计、数据页（词条 / TM / 术语 / 账本）
+- **扩展位**：插件 / SKILL / MCP 三栏管理（预留接口）
+- **提示词可配置**：六个环节的 system prompt 均可在界面中替换，留空则使用内置默认值
 
 ---
 
-## 🖥 界面
+## 🖥 界面预览
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/overview-dark.png" alt="概览"><br/><sub><b>概览</b>：一屏看完进度、目录分布、最近任务、状态</sub></td>
-<td width="50%"><img src="docs/screenshots/writeback-light.png" alt="回写"><br/><sub><b>回写</b>（浅色主题）：选记录 → 定门槛与形态 → 出报告</sub></td>
+<td width="50%"><img src="docs/screenshots/overview-dark.png" alt="概览"><br/><sub><b>概览</b>：单屏汇总进度、目录分布、最近任务与运行状态</sub></td>
+<td width="50%"><img src="docs/screenshots/writeback-light.png" alt="回写"><br/><sub><b>回写</b>（浅色主题）：选择记录 → 设定门槛与产出形态 → 生成报告</sub></td>
 </tr>
 <tr>
-<td><img src="docs/screenshots/extract-dark.png" alt="提取"><br/><sub><b>提取</b>：提取器管理 + 风险警示 + 提取记录</sub></td>
+<td><img src="docs/screenshots/extract-dark.png" alt="提取"><br/><sub><b>提取</b>：提取器管理、风险提示与提取记录</sub></td>
 <td><img src="docs/screenshots/models-dark.png" alt="模型"><br/><sub><b>模型</b>：源 → 模型 → 任务路由，三层结构</sub></td>
 </tr>
 </table>
 
-> 截图来自 `ptz serve --mock`（内置假平台演示模式，不碰真实项目）。
+> 截图取自 `ptz serve --mock`（内置假平台演示模式，不访问真实项目）。
 
 ---
 
 ## 🏁 快速开始
 
-### 方式一：Windows 免安装包（不写代码就用这个）
+### 方式一：Windows 免安装包（无需编程环境）
 
-到 [**Releases**](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest) 下载
-`paratranz-agent-x.y.z-win64.zip`，解压到任意目录（路径含中文、空格都行），然后：
+在 [**Releases**](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest) 下载
+`paratranz-agent-x.y.z-win64.zip`，解压至任意目录（路径可含中文与空格），随后：
 
-| 双击 | 作用 |
+| 文件 | 作用 |
 | --- | --- |
-| **`web.bat`** | 打开可视化控制台，浏览器自动打开 `http://127.0.0.1:8787` |
-| **`ptz.bat`** | 命令行（等价于 `ptz`，参数照传，如 `ptz.bat status`） |
+| **`web.bat`** | 启动可视化控制台，浏览器自动打开 `http://127.0.0.1:8787` |
+| **`ptz.bat`** | 命令行入口（等价于 `ptz`，参数原样传递，如 `ptz.bat status`） |
 
-**不需要装 Python，也不需要联网装依赖**——包里自带官方 Python 运行时和全部依赖，约 21 MB。
+**无需安装 Python，也无需联网安装依赖**：压缩包内已附带官方 Python 运行时与全部依赖，约 20 MB。
 
-- 想先看看界面：`web.bat --mock`（内置假平台，完整演示五条流水线，不碰真实项目）
-- 数据都在解压目录的 `.ptz-state\` 里（Token、Key、任务与提取记录）；备份就复制这个文件夹，换机器带走即可
-- 卸载 = 删掉文件夹，不写注册表、不装服务
-- 包里附带 `快速上手.txt`，写了首次配置、常见问题与卸载
+- 如需先预览界面：`web.bat --mock`（内置假平台，完整演示五条流水线，不访问真实项目）
+- 数据保存在解压目录下的 `.ptz-state\` 中（Token、Key、任务与提取记录）；备份时复制该目录即可，迁移机器时一并带走
+- 卸载方式：删除该目录即可，不写入注册表、不安装系统服务
+- 包内附带 `快速上手.txt`，涵盖首次配置、常见问题与卸载说明
 
 ### 方式二：从源码安装
 
@@ -125,68 +125,54 @@ python -m venv .venv
 pip install -e .
 ```
 
-需要 Python ≥ 3.11。然后：
+需要 Python 3.11 及以上版本。随后执行：
 
 ```bash
 ptz serve            # 打开 http://127.0.0.1:8787
-ptz serve --mock     # 没有 Token 也能看的演示模式
+ptz serve --mock     # 无需 Token 的演示模式
 ```
 
-Windows 上也可以直接双击仓库里的 `web.bat`。
+Windows 环境下也可直接双击仓库中的 `web.bat`。
 
-### 3. 填两样东西
+### 配置项目与模型
 
-在界面里配置，不需要改文件：
+全部配置均在界面中完成，无需修改文件：
 
-1. **「项目」页** —— ParaTranz API Token + 项目编号（点「测试连接」）
-2. **「模型」页** —— 一个 OpenAI 兼容的 API（地址 / Key / 模型名，可点「获取模型列表」自动探测）
+1. **「项目」页**：填写 ParaTranz API Token 与项目编号，点击「测试连接」
+2. **「模型」页**：配置一个 OpenAI 兼容 API（地址、Key、模型名），可点击「获取模型列表」自动探测
 
-然后就能在「概览」页直接下指令，或到各页面点按钮。
+完成上述配置后，可在「概览」页直接下达指令，或在各功能页执行操作。
 
 ### 常用命令
 
 ```bash
 ptz doctor                       # 体检：Token、权限、平台能力开关
 ptz status                       # 项目进度概览
-ptz plan --dry-run               # 预演分派，不落地
-ptz translate --limit 200 --yes  # 真翻 200 条
+ptz plan --dry-run               # 预演分派，不写入平台
+ptz translate --limit 200 --yes  # 实际翻译 200 条
 ptz review --yes                 # 校对并写回 stage
-ptz glossary --yes               # 抽术语并发布
+ptz glossary --yes               # 抽取术语并发布
 ptz styleguide --yes             # 生成规范并发布为公告
-ptz writeback <提取记录id> --yes  # 把确认译文写回游戏文件
-ptz watch                        # 常驻守护：有活就干，没活就等
+ptz writeback <提取记录id> --yes  # 将确认译文写回游戏文件
+ptz watch                        # 常驻守护：有任务即执行，无任务则等待
 ```
 
-写操作默认 **dry-run**，必须显式 `--yes` 才落地；所有命令都支持 `--json` 供上层编排。
+写操作默认以 **dry-run** 执行，需显式指定 `--yes` 才会实际写入；所有命令均支持 `--json`，便于上层编排。
 
 ---
 
 ## 🔐 安全设计
 
-这套工具会**在你的机器上执行代码**（提取器）、**改动你的游戏文件**（回写）、**替你花模型的钱**（翻译）。所以：
+本工具会**在用户机器上执行代码**（提取器）、**改动游戏文件**（回写）、**产生模型调用费用**（翻译）。因此采取以下措施：
 
 | 风险 | 处置 |
 | --- | --- |
-| 提取器 = 本机任意代码执行 | 常驻警示条 + 5 秒倒计时确认 + 后端 `accept_risk` 硬拦。闸门在**工具层**，所以路由、`POST /api/jobs`、`/api/agent` 三个入口都绕不过去 |
-| Agent 被提示注入触发危险动作 | `/api/agent` 不自动执行危险工具，只把待办列出来让你手动确认 |
-| 回写覆盖游戏文件 | 默认产出到独立目录；原地改需显式授权 + 自动备份 + manifest |
-| 凭据泄露 | 只存本地 `settings.json`（权限收紧）；接口只回显尾号；日志、SSE、错误响应统一脱敏 |
-| 任意网页调用本机 WebUI | 校验 `Host` / `Origin`，挡 DNS rebinding 与 CSRF |
-| 误连真实项目 | 演示模式与真实模式在界面上明确区分（`DEMO` 标记） |
-
----
-
-## ⚠️ 几个实测出来的平台约束
-
-这些是踩过坑之后写进代码的，不是抄文档：
-
-- **列表接口返回分页包** `{results,...}`，只有 `/files`、`/files/{id}/translation`、`/members` 是裸数组
-- **`POST /strings` 必须带 `translation`**（哪怕空串），否则服务端 500 —— spec 里没标必填
-- **`POST /issues` 必须带 `title`**，`stringId` 被静默忽略；平台**没有词条级评论接口**，打回理由只能发成项目级讨论帖
-- **`PUT /strings` 的 `edit` 分级权限**：翻译只能改未审核词条 → `pass_stage=5` 之后 `translate` 改不动那些词条
-- **`PUT /terms` 是 upsert 不是全量同步**（实测：只提交一半，其余一条没丢）
-- **列表字段可能是 `null`**（如 `Term.variants`），模型必须容忍
-- 全局限流 **480 次/分钟**按用户计；`suggestions` 接口在 ES 上检索，必须串行
+| 提取器等同于本机任意代码执行 | 常驻警示条、5 秒倒计时确认与后端 `accept_risk` 强制校验；校验位于**工具层**，因此路由、`POST /api/jobs` 与 `/api/agent` 三个入口均无法绕过 |
+| Agent 被提示注入触发危险动作 | `/api/agent` 不自动执行危险工具，仅列出待确认步骤，由用户手动确认后执行 |
+| 回写覆盖游戏文件 | 默认产出至独立目录；原地修改需显式授权，并自动备份且生成 manifest |
+| 凭据泄露 | 仅保存在本地 `settings.json`（收紧文件权限）；接口仅回显尾号；日志、SSE 与错误响应统一脱敏 |
+| 任意网页调用本机 WebUI | 校验 `Host` 与 `Origin`，防御 DNS rebinding 与 CSRF |
+| 误连真实项目 | 演示模式与真实模式在界面中明确区分（`DEMO` 标记） |
 
 ---
 
@@ -194,8 +180,8 @@ ptz watch                        # 常驻守护：有活就干，没活就等
 
 | 文档 | 内容 |
 | --- | --- |
-| [WebUI 说明](WebUI说明.md) | 每个页面怎么用、两个安全开关、API 一览 |
-| [config/agent.example.yaml](config/agent.example.yaml) | 配置文件模板（也可以全在界面里配） |
+| [WebUI 说明](WebUI说明.md) | 各页面使用方法、两个安全开关、API 一览 |
+| [config/agent.example.yaml](config/agent.example.yaml) | 配置文件模板（亦可在界面中完成配置） |
 | `ptz --help` / 各子命令 `--help` | 命令行用法（写操作默认 dry-run，需 `--yes`） |
 
 ---
@@ -204,26 +190,26 @@ ptz watch                        # 常驻守护：有活就干，没活就等
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests -q      # 单元 + 端到端（全部离线，用内存假平台）
+python -m pytest tests -q      # 单元测试与端到端测试（全部离线，使用内存假平台）
 python smoke.py                # CLI 全流程冒烟
-python web_smoke.py            # WebUI 冒烟（真 HTTP）
+python web_smoke.py            # WebUI 冒烟（真实 HTTP 请求）
 python -m ruff check --select F,E9,B,S102,S301,S307,S506,S608,ASYNC src tests smoke.py web_smoke.py tools
 ```
 
-CI 在 ubuntu + windows 上各跑 3.11 / 3.13 两版。仓库里还有几个真机验证工具（需要你自己的 Token，慎用）：
+CI 在 ubuntu 与 windows 上分别执行 Python 3.11 / 3.13 两版。仓库另附若干真机验证工具（需自备 Token，请谨慎使用）：
 
-- `tools/build_portable.py` —— 构建 Windows 免安装包（下载官方 embeddable Python + 打 zip + 出自检与 sha256），发版一条命令
-- `tools/realcheck.py` —— 真实平台体检：端点返回形态 / QA 规则分布 / 抽样复核 / stage 复位
-- `tools/verify_writeback_real.py` —— 回写全链路真机验证（自建临时文件，跑完自清）
-- `tools/check_spec_coverage.py` —— 用 AST 比对 `client.py` 与官方 OpenAPI spec，查打错端点/参数名
+- `tools/build_portable.py`：构建 Windows 免安装包（下载官方 embeddable Python、打包 zip 并生成自检与 sha256），发版时一条命令完成
+- `tools/realcheck.py`：真实平台体检，涵盖端点返回形态、QA 规则分布、抽样复核与 stage 复位
+- `tools/verify_writeback_real.py`：回写全链路真机验证（自建临时文件，执行后自动清理）
+- `tools/check_spec_coverage.py`：以 AST 比对 `client.py` 与官方 OpenAPI spec，检查端点与参数名错误
 
 ---
 
 ## ⚖️ 免责声明
 
-本项目是**第三方工具**，与 ParaTranz 官方无关。它会以你的身份调用 ParaTranz API，请自行确认你的项目权限与平台条款。
+本项目为**第三方工具**，与 ParaTranz 官方无关。本工具会以用户身份调用 ParaTranz API，请自行确认项目权限与平台条款。
 
-危险动作（执行提取器脚本、原地改写游戏文件、对真实项目发写请求）都需要你显式确认，**后果由使用者自行承担**。建议先在 `--mock` 演示模式或闲置项目上跑通再用于正式项目。
+危险动作（执行提取器脚本、原地改写游戏文件、对真实项目发起写请求）均需用户显式确认，**后果由使用者自行承担**。建议先在 `--mock` 演示模式或闲置项目上完成验证，再用于正式项目。
 
 ---
 
@@ -231,4 +217,4 @@ CI 在 ubuntu + windows 上各跑 3.11 / 3.13 两版。仓库里还有几个真�
 
 [GNU Affero General Public License v3.0](LICENSE)
 
-简单说：你可以自由使用、修改、分发；但如果你把它（或修改版）作为网络服务提供给别人用，**必须公开源代码**。如果你需要更宽松的授权（例如闭源集成），欢迎开 issue 讨论。
+简言之：可自由使用、修改与分发；若将本工具（或其修改版本）作为网络服务对外提供，必须公开源代码。如需更宽松的授权（例如闭源集成），欢迎提交 issue 讨论。
