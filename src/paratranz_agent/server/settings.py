@@ -29,6 +29,8 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
 
 MODEL_TASKS: tuple[str, ...] = ("agent", "translate", "review", "glossary", "styleguide", "extractor")
+# 环节 id → 界面文案。「模型页的任务路由」与「提示词页的环节名」是同一批环节，
+# 所以只存这一份表；英文界面用下面的 `_EN`，缺项回落中文。
 TASK_LABELS = {
     "agent": "Agent 意图解析",
     "translate": "翻译",
@@ -37,9 +39,18 @@ TASK_LABELS = {
     "styleguide": "规范生成",
     "extractor": "提取脚本生成",
 }
+TASK_LABELS_EN = {
+    "agent": "Agent intent parsing",
+    "translate": "Translation",
+    "review": "Review",
+    "glossary": "Glossary extraction",
+    "styleguide": "Style guide",
+    "extractor": "Extractor script generation",
+}
 
 CAPABILITIES = ("text", "image", "audio", "tool")
 CAP_LABELS = {"text": "文本", "image": "图像", "audio": "音频", "tool": "工具使用"}
+CAP_LABELS_EN = {"text": "Text", "image": "Image", "audio": "Audio", "tool": "Tool use"}
 
 SEP = "::"  # provider::model 的分隔符
 
@@ -153,15 +164,8 @@ class PromptCfg(BaseModel):
 PROMPT_TASKS: tuple[str, ...] = (
     "translate", "review", "glossary", "styleguide", "agent", "extractor"
 )
-PROMPT_LABELS = {
-    "translate": "翻译",
-    "review": "校对",
-    "glossary": "术语抽取",
-    "styleguide": "规范生成",
-    "agent": "Agent 意图解析",
-    "extractor": "提取脚本生成",
-}
-
+# 提示词环节清单。展示用文案统一走 `TASK_LABELS`（与「模型 → 任务路由」
+# 是同一批环节，各存一份表必然漂移，所以只留一份）。
 
 class RuntimeSettings(BaseModel):
     # ---- 平台 ----
@@ -299,7 +303,10 @@ class RuntimeSettings(BaseModel):
         d["has_token"] = bool(self.token)
         d["providers"] = [p.masked() for p in self.providers]
         d["routing"] = self.routing.as_dict()
-        d["tasks"] = [{"id": t, "label": TASK_LABELS[t]} for t in MODEL_TASKS]
+        d["tasks"] = [
+            {"id": t, "label": TASK_LABELS[t], "label_en": TASK_LABELS_EN.get(t, "")}
+            for t in MODEL_TASKS
+        ]
         d["prompts"] = self.prompts.model_dump()
         d["effective"] = {}
         for t in MODEL_TASKS:

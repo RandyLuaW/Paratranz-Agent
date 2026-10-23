@@ -13,7 +13,7 @@ from ...pipelines.translate import SYSTEM_PROMPT as TRANSLATE_SYSTEM
 from ..agent import AGENT_SYSTEM
 from ..deps import Deps
 from ..extractor_agent import SYSTEM_PROMPT as EXTRACTOR_SYSTEM
-from ..settings import PROMPT_LABELS, PROMPT_TASKS, RuntimeSettings
+from ..settings import PROMPT_TASKS, RuntimeSettings, TASK_LABELS, TASK_LABELS_EN
 
 # 这几个字段各有专用端点（providers/routing/prompts/budget/pricing），
 # 不走「打补丁」这条路，所以补丁模型里排除它们。
@@ -100,7 +100,10 @@ def register(app: FastAPI, d: Deps) -> None:
         return {
             "prompts": s.prompts.model_dump(),
             "defaults": DEFAULT_PROMPTS,
-            "tasks": [{"id": t, "label": PROMPT_LABELS[t]} for t in PROMPT_TASKS],
+            "tasks": [
+                {"id": t, "label": TASK_LABELS[t], "label_en": TASK_LABELS_EN.get(t, "")}
+                for t in PROMPT_TASKS
+            ],
             "prefix_effective": bool((s.prompts.prefix or "").strip()),
         }
 

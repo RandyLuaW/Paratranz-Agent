@@ -195,9 +195,17 @@ function startI18nWatcher() {
   _i18nObserver = new MutationObserver(() => {
     if (_i18nBusy) return;
     _i18nBusy = true;
-    const run = () => { _i18nBusy = false; translateAll(); };
+    // 只跑一次：rAF 与定时器谁先到用谁
+    const run = () => {
+      if (!_i18nBusy) return;
+      _i18nBusy = false;
+      translateAll();
+    };
     if (window.requestAnimationFrame) requestAnimationFrame(run);
-    else setTimeout(run, 16);
+    // rAF 在后台标签页会被节流，在部分自动化/嵌入环境里**完全不触发**——
+    // 那时 `_i18nBusy` 会一直为 true，后续节点再也不翻译（实测踩过：
+    // 无头浏览器里切页后整页停在中文）。所以始终挂一个定时器兜底。
+    setTimeout(run, 50);
   });
   for (let i = 0; i < targets.length; i++) {
     const el = document.querySelector(targets[i]);

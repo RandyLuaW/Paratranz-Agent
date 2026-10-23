@@ -790,11 +790,16 @@ def build_registry(ctx: AppContext) -> dict[str, Callable[..., dict]]:
     }
 
 
+# 工具清单。`*_en` 是给英文界面用的第二份文案：界面按当前语言挑，
+# 缺 `*_en` 就回落中文。**端点本身是 ASCII 时不写 `endpoint_en`**——
+# 两份一模一样的东西不叫双语，只叫重复。
 TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "status",
         "label": "项目概览",
+        "label_en": "Project overview",
         "description": "读取项目进度、文件数、任务、术语数",
+        "description_en": "Read project progress, file count, tasks and term count",
         "params": {},
         "writes": False,
         "endpoint": "GET /projects/{id}",
@@ -802,7 +807,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "files",
         "label": "文件清单",
+        "label_en": "File list",
         "description": "列出所有文件及其翻译进度，按待翻译量降序",
+        "description_en": "List all files with translation progress, busiest first",
         "params": {},
         "writes": False,
         "endpoint": "GET /projects/{id}/files",
@@ -810,7 +817,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "plan",
         "label": "分派任务",
+        "label_en": "Assign tasks",
         "description": "按未翻译量装箱，生成带验收标准的任务并创建",
+        "description_en": "Pack untranslated volume into tasks with acceptance criteria and create them",
         "params": {"dry_run": "只预览不创建"},
         "writes": True,
         "endpoint": "POST /projects/{id}/tasks",
@@ -818,7 +827,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "translate",
         "label": "翻译",
+        "label_en": "Translate",
         "description": "TM 命中直出 + LLM 翻译 + 占位符硬拦 + 写回 stage=1",
+        "description_en": "TM hits pass straight through + LLM translation + placeholder guard + write stage=1",
         "params": {"limit": "本次最多处理条数"},
         "writes": True,
         "endpoint": "PUT /projects/{id}/strings",
@@ -826,7 +837,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "review",
         "label": "校对",
+        "label_en": "Review",
         "description": "确定性 QA + LLM 二审，通过→已检查，打回→有疑问",
+        "description_en": "Deterministic QA + LLM second pass: pass → checked, fail → disputed",
         "params": {"limit": "本次最多处理条数", "include_disputed": "同时复核有疑问条目"},
         "writes": True,
         "endpoint": "PUT /projects/{id}/strings (stage)",
@@ -834,7 +847,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "glossary",
         "label": "术语",
+        "label_en": "Glossary",
         "description": "从已定稿译文抽术语并批量导入",
+        "description_en": "Extract terms from finalized translations and import them in bulk",
         "params": {"overwrite": "覆盖译法不同的既有术语"},
         "writes": True,
         "endpoint": "PUT /projects/{id}/terms",
@@ -842,7 +857,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "styleguide",
         "label": "汉化规范",
+        "label_en": "Style guide",
         "description": "按项目实况生成规范并发布为公告",
+        "description_en": "Generate a style guide from the project's actual state and publish it as an announcement",
         "params": {"with_llm": "用模型润色风格章节"},
         "writes": True,
         "endpoint": "POST /projects/{id}/announcements",
@@ -850,43 +867,57 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "run",
         "label": "全流程",
+        "label_en": "Full pipeline",
         "description": "分派 → 翻译 → 校对 → 术语 → 规范，一次跑完",
+        "description_en": "Assign → translate → review → glossary → style guide, all in one run",
         "params": {},
         "writes": True,
         "endpoint": "多个",
+        "endpoint_en": "Multiple",
     },
     {
         "name": "extract",
         "label": "提取词条",
+        "label_en": "Extract strings",
         "description": "跑提取器把游戏文件里的词条抽成 JSONL，不碰平台",
+        "description_en": "Run an extractor to pull strings out of game files into JSONL; does not touch the platform",
         "params": {"extractor_id": "提取器 id", "game_dir": "游戏目录", "options": "提取参数",
                    "accept_risk": "必填：确认执行本机代码的风险"},
         "writes": False,
         "endpoint": "本地文件系统",
+        "endpoint_en": "Local filesystem",
     },
     {
         "name": "extractor_generate",
         "label": "Agent 写提取器",
+        "label_en": "Agent writes extractor",
         "description": "扫描游戏目录，让模型生成提取脚本并自动试跑",
+        "description_en": "Scan the game directory and let the model generate an extractor script, then trial-run it",
         "params": {"game_dir": "游戏目录", "hint": "额外要求（可选）",
                    "accept_risk": "必填：确认执行本机代码的风险"},
         "writes": False,
         "endpoint": "本地文件系统 + LLM",
+        "endpoint_en": "Local filesystem + LLM",
     },
     {
         "name": "extractor_improve",
         "label": "Agent 改提取器",
+        "label_en": "Agent improves extractor",
         "description": "看着现有脚本和上次日志，让模型改进并用新版本试跑",
+        "description_en": "Show the model the current script and last log, then let it improve and trial-run the new version",
         "params": {"extractor_id": "提取器 id", "game_dir": "游戏目录",
                    "feedback": "改进要求（可选）",
                    "accept_risk": "必填：确认执行本机代码的风险"},
         "writes": False,
         "endpoint": "本地文件系统 + LLM",
+        "endpoint_en": "Local filesystem + LLM",
     },
     {
         "name": "extraction_import",
         "label": "导入提取结果",
+        "label_en": "Import extraction",
         "description": "把提取的词条逐条创建到平台指定文件（只新增缺失的 key）",
+        "description_en": "Create extracted strings one by one in a platform file (only adds missing keys)",
         "params": {"extraction_id": "提取记录 id", "file_id": "目标文件 id",
                    "force": "跳过校验错误"},
         "writes": True,
@@ -895,7 +926,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "writeback",
         "label": "回写译文到游戏文件",
+        "label_en": "Write back to game files",
         "description": "把平台上达到门槛的确认译文，按提取记录的 key 写回游戏文件（默认只输出到旁路目录）",
+        "description_en": "Write confirmed translations above the stage threshold back into game files by extraction key (outputs to a side directory by default)",
         "params": {"extraction_id": "提取记录 id", "min_stage": "译文门槛 1/3/5",
                    "out_dir": "输出目录（空=游戏目录旁的 <游戏目录>_cn）",
                    "mode": "mirror 整包镜像 / patch 仅改动文件",
@@ -903,13 +936,17 @@ TOOL_SPECS: list[dict[str, Any]] = [
                    "dry_run": "仅预览，不落盘"},
         "writes": True,
         "endpoint": "本地文件（读平台 GET /strings）",
+        "endpoint_en": "Local files (reads platform GET /strings)",
     },
     {
         "name": "qa_check",
         "label": "单条自查",
+        "label_en": "Single-string check",
         "description": "对一条原文/译文跑确定性 QA，译者在网页里自查",
+        "description_en": "Run deterministic QA on one original/translation pair, right in the web UI",
         "params": {"original": "原文", "translation": "译文"},
         "writes": False,
         "endpoint": "本地规则",
+        "endpoint_en": "Local rules",
     },
 ]

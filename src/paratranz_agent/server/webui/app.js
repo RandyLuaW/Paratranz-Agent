@@ -28,6 +28,18 @@ const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+/* 双语字段取值：后端把 `xxx` 与 `xxx_en` 两份一起给（工具清单、提取器元信息、
+ * 任务名），界面按当前语言挑一个。中文优先原字段，英文缺 `_en` 就回落中文——
+ * 第三方导入的提取器只有中文描述，回落比显示空白更接近真实。
+ * 与 `t()` 的分工：`t()` 管**前端模板里的固定文案**（走字典），
+ * `L()` 管**后端数据里的动态文案**（后端本来就两端都给了，不必进字典）。 */
+function L(obj, key) {
+  if (!obj) return '';
+  const base = obj[key] || '';
+  if (typeof isEn !== 'function' || !isEn()) return base;
+  return obj[key + '_en'] || base;
+}
+
 /* ------------------------------------------------------------------ API */
 async function api(method, path, body) {
   const opt = { method, headers: {} };
@@ -592,10 +604,10 @@ function renderTools(main) {
     <div class="toolgrid">
       ${tools.map((t) => `
         <div class="tool">
-          <div class="t">${esc(t.label)}
+          <div class="t">${esc(L(t, 'label'))}
             ${t.writes ? '<span class="tag w">写</span>' : '<span class="tag">读</span>'}</div>
-          <div class="d">${esc(t.description)}</div>
-          <div class="e">${esc(t.endpoint)}</div>
+          <div class="d">${esc(L(t, 'description'))}</div>
+          <div class="e">${esc(L(t, 'endpoint'))}</div>
           <div class="a"><button class="btn" data-run="${esc(t.name)}">运行</button></div>
         </div>`).join('')}
     </div>`;
@@ -1357,7 +1369,7 @@ function routingView(d) {
         <th style="width:210px">当前生效</th></tr></thead>
       <tbody>
         ${d.tasks.map((t) => `<tr>
-          <td><b>${esc(t.label)}</b>
+          <td><b>${esc(L(t, 'label'))}</b>
             <div class="dim mono" style="font-size:10.5px">${esc(t.id)}</div></td>
           <td><select class="field r_sel" data-task="${esc(t.id)}">
             <option value="">（跟随默认）</option>
@@ -1628,8 +1640,9 @@ async function renderUsage(main) {
 
     <h3>预算护栏</h3>
     <p class="muted" style="margin-top:-4px;font-size:12.5px">
-      任一上限触发即按「动作」处理。<b>硬拦截</b>会在任务开始前就拒绝执行；
-      <b>切备用</b>当前只告警并提示备用模型（自动切换需重建连接，暂未启用）。
+      ${t('任一上限触发即按「动作」处理。')}
+      <b>${t('硬拦截')}</b>${t('：会在任务开始前就拒绝执行。')}
+      <b>${t('切备用')}</b>${t('：当前只告警并提示备用模型（自动切换需重建连接，暂未启用）。')}
     </p>
     <div class="card" style="padding:0;overflow:auto">
       <table>
@@ -1673,7 +1686,7 @@ async function renderUsage(main) {
         <button class="btn" id="savePricing">写入定价</button>
       </div>
       <div class="muted" style="font-size:12px;margin-top:6px">
-        模型名匹配：精确 &gt; 前缀 &gt; 子串，最长优先。所以 <code>gpt-4o-mini-2024-07-18</code> 会自动命中 <code>gpt-4o-mini</code>。
+        ${t('模型名匹配：精确 &gt; 前缀 &gt; 子串，最长优先。所以')} <code>gpt-4o-mini-2024-07-18</code> ${t('会自动命中')} <code>gpt-4o-mini</code>。
       </div>
     </div>
 
@@ -1957,7 +1970,7 @@ async function renderExtract(main) {
   main.innerHTML = `
     ${pageHead(
       '提取',
-      `${list.length} 个提取器 · 从游戏文件抽词条 → 校验 → 导入平台`,
+      `${list.length} 个提取器 · ${t('从游戏文件抽词条 → 校验 → 导入平台')}`,
       '<button class="btn primary" id="addExtractor">+ 导入提取器</button>'
     )}
     <div class="subtabs">
@@ -1990,7 +2003,7 @@ function extractItem(x, sel) {
   return `<button class="mitem ${sel && x.id === sel.id ? 'on' : ''}" data-eid="${esc(x.id)}">
     <span class="mdot ${x.enabled === false ? '' : 'ok'}"></span>
     <span class="mi-main">
-      <b>${esc(x.name)}</b>
+      <b>${esc(L(x, 'name'))}</b>
       <span class="mono dim">${esc(x.engine)} · v${esc(x.version)}</span>
     </span>
     ${x.source === 'agent' ? '<span class="tag ok">Agent</span>' : ''}
@@ -2022,32 +2035,32 @@ function extractRunView(list, sel) {
 function extractForm(x) {
   const args = (x.args || []).map((a) => `
     <div class="formrow">
-      <label class="lbl">${esc(a.label || a.name)}${a.hint ? `<span class="dim" style="font-weight:400"> · ${esc(a.hint)}</span>` : ''}</label>
+      <label class="lbl">${esc(L(a, 'label') || a.name)}${(L(a, 'hint')) ? `<span class="dim" style="font-weight:400"> · ${esc(L(a, 'hint'))}</span>` : ''}</label>
       <input class="field x_arg" data-arg="${esc(a.name)}" value="${esc(a.default || '')}">
     </div>`).join('');
 
   return `
   <div class="notice warn" style="margin-bottom:12px">
-    <b>⚠ 提取器会在本机执行代码</b>：下方脚本以当前用户权限运行，
-    可读写任意文件、访问网络。<b>只运行你自己写的或来源可信的提取器</b>，
-    执行后果由使用者自行承担。
+    <b>${t('⚠ 提取器会在本机执行代码')}</b>
+    <div style="margin-top:4px">${t('下方脚本以当前用户权限运行，可读写任意文件、访问网络。')}</div>
+    <div>${t('只运行你自己写的或来源可信的提取器，执行后果由使用者自行承担。')}</div>
   </div>
   <div class="card">
     <div class="row" style="justify-content:space-between;margin-bottom:10px">
       <div class="row" style="gap:6px">
-        <b style="font-size:14px">${esc(x.name)}</b>
+        <b style="font-size:14px">${esc(L(x, 'name'))}</b>
         <span class="mono dim">${esc(x.id)}</span>
         <span class="tag">${esc(x.engine)}</span>
         ${x.source === 'agent' ? '<span class="tag ok">Agent 生成</span>' : ''}
         ${x.builtin ? '<span class="tag">内置</span>' : ''}
       </div>
       <div class="row">
-        <button class="btn sm" id="improveExtractor">🤖 让 Agent 改进</button>
+        <button class="btn sm" id="improveExtractor">🤖 ${t('让 Agent 改进')}</button>
         ${x.builtin ? '' : '<button class="btn danger sm" id="delExtractor">删除</button>'}
       </div>
     </div>
-    <div class="muted" style="font-size:12px;margin-bottom:10px">${esc(x.desc || '')}</div>
-    ${x.input_hint ? `<div class="dim" style="font-size:11.5px;margin-bottom:10px">输入：${esc(x.input_hint)}</div>` : ''}
+    <div class="muted" style="font-size:12px;margin-bottom:10px">${esc(L(x, 'desc'))}</div>
+    ${L(x, 'input_hint') ? `<div class="dim" style="font-size:11.5px;margin-bottom:10px">${esc(isEn() ? 'Input: ' : '输入：')}${esc(L(x, 'input_hint'))}</div>` : ''}
 
     <div class="formrow">
       <label class="lbl">游戏目录（绝对路径）</label>
@@ -2888,8 +2901,7 @@ async function renderWriteback(main) {
     </div>
     ${jobs.length ? wbJobsTable(jobs, sel) : `
       <div class="card"><div class="empty">
-        还没有可回写的提取记录：先去「提取」页扫一遍游戏目录、把词条导入平台，
-        等平台上的译文过了门槛，再回来这里回写成品。
+        ${t('还没有可回写的提取记录：先去「提取」页扫一遍游戏目录、把词条导入平台，等平台上的译文过了门槛，再回来这里回写成品。')}
         <div style="margin-top:10px">
           <button class="btn" id="wbGoExtract">去提取页</button>
         </div>
@@ -2944,8 +2956,9 @@ async function renderPrompts(main) {
     )}
 
     <div class="notice ${prefixOn ? 'safe' : ''}">
-      <b>总前置提示词</b>：会注入到<b>所有环节</b>的 system prompt 最前面。
-      适合放全局约定，例如「本项目是 RPG Maker MV 游戏，控制符必须原样保留」。
+      <b>${t('总前置提示词')}</b>
+      <div style="margin-top:4px">${t('会注入到所有环节的 system prompt 最前面。')}</div>
+      <div>${t('适合放全局约定，例如「本项目是 RPG Maker MV 游戏，控制符必须原样保留」。')}</div>
     </div>
     <div class="card" style="margin-bottom:14px">
       <textarea class="field" id="p_prefix" rows="4"
@@ -2960,7 +2973,7 @@ async function renderPrompts(main) {
     <div class="subtabs">
       ${(d.tasks || []).map((t) => `
         <button data-ptab="${esc(t.id)}" class="${tab === t.id ? 'on' : ''}">
-          ${esc(t.label)}${(p[t.id] || '').trim() ? ' ●' : ''}
+          ${esc(L(t, 'label'))}${(p[t.id] || '').trim() ? ' ●' : ''}
         </button>`).join('')}
     </div>
 
@@ -3181,7 +3194,7 @@ function extCard(x, kind) {
       <div class="ec-icon">${esc(initial)}</div>
       <div class="ec-head">
         <div class="ec-title">
-          <b>${esc(x.name || x.id)}</b>
+          <b>${esc(L(x, 'name') || x.id)}</b>
           ${x.version ? `<span class="dim">${esc(x.version)}</span>` : ''}
           ${x.enabled
             ? '<span class="tag ok">已启用</span>'
@@ -3198,7 +3211,7 @@ function extCard(x, kind) {
                ${x.enabled ? 'checked' : ''}>
       </label>
     </div>
-    <div class="ec-desc">${esc(x.desc || '（无描述）')}</div>
+    <div class="ec-desc">${esc(L(x, 'desc') || t('（无描述）'))}</div>
     <div class="ec-foot">
       <span class="mono dim" style="font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
         ${esc(x.path || x.id)}

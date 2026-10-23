@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from ..deps import Deps
-from ..settings import MODEL_TASKS, TASK_LABELS, join_ref
+from ..settings import MODEL_TASKS, TASK_LABELS, TASK_LABELS_EN, join_ref
 
 
 def register(app: FastAPI, d: Deps) -> None:
@@ -20,7 +20,10 @@ def register(app: FastAPI, d: Deps) -> None:
         out = {
             "providers": [p.masked() for p in s.providers],
             "routing": s.routing.as_dict(),
-            "tasks": [{"id": t, "label": TASK_LABELS[t]} for t in MODEL_TASKS],
+            "tasks": [
+                {"id": t, "label": TASK_LABELS[t], "label_en": TASK_LABELS_EN.get(t, "")}
+                for t in MODEL_TASKS
+            ],
             "effective": {},
         }
         for t in MODEL_TASKS:

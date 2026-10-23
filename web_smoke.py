@@ -223,6 +223,11 @@ function sandbox(fetchImpl) {
     EventSource: function () { this.close = () => {}; this.addEventListener = () => {}; },
   };
   ctx.window = ctx;
+  // app.js 依赖 i18n.js 提供的两个全局（`t()` 查字典、`isEn()` 判语言）。
+  // 探针只加载 app.js，所以这两个要垫上：中文环境语义（t 原样返回）。
+  ctx.I18N = { zh: {}, en: {} };
+  ctx.t = (s) => s;
+  ctx.isEn = () => false;
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx, { filename: 'app.js' });
   return { ctx, doc, intervals, main };
@@ -1251,7 +1256,7 @@ def main() -> int:
         check("切页/关弹窗停止轮询",
               pick("轮询已停止" in (wb_epoch.get("hint") or "")
                    and wb_epoch.get("polls") == 2,
-                   "ep !== renderEpoch" in app_js and "closed" in app_js),
+                   "ep !== renderEpoch" in app_js and "关闭弹窗" in app_js),
               wbd(str(wb_epoch)))
 
         print("\n== 回写设置项与输出形态 ==")
@@ -1510,6 +1515,40 @@ def main() -> int:
         check("i18n 提供 DOM 翻译与语言切换",
               all(s in i18n_js.text for s in ("function translateDom", "function applyLang",
                                               "function currentLang", "LANG_RULES")))
+
+        print("\n== 英文覆盖率（14 页实测后固化）==")
+        # 实测过一轮「14 页全扫」：11 页零残留，3 页剩的都是**数据**而非界面
+        # （语言名「简体中文」、设置页 style 的出厂值、提示词页内置默认提示词）。
+        # 下面把两类东西钉住：①后端要同时给中英两份；②固定文案的键要在字典里。
+        tools_json = c.get("/api/tools").json().get("tools") or []
+        check("每个工具都带 label_en / description_en",
+              bool(tools_json) and all(t.get("label_en") and t.get("description_en")
+                                       for t in tools_json),
+              f"{len(tools_json)} 个工具")
+        ext_json = c.get("/api/extractors").json().get("extractors") or []
+        builtin_ext = [x for x in ext_json if x.get("builtin")]
+        check("内置提取器都带 name_en / desc_en / input_hint_en",
+              bool(builtin_ext) and all(
+                  x.get("name_en") and x.get("desc_en") and x.get("input_hint_en")
+                  for x in builtin_ext),
+              f"{len(builtin_ext)} 个内置")
+        check("内置提取器的参数也带 label_en",
+              all(all(a.get("label_en") for a in x.get("args") or []) for x in builtin_ext))
+        tasks_json = c.get("/api/settings").json()["settings"].get("tasks") or []
+        check("任务清单带 label_en（模型页与提示词页共用）",
+              bool(tasks_json) and all(t.get("label_en") for t in tasks_json),
+              f"{len(tasks_json)} 个环节")
+        check("提示词页的任务清单也带 label_en",
+              all(t.get("label_en") for t in
+                  (c.get("/api/prompts").json().get("tasks") or [])))
+        check("面包屑分组名有英文（否则每页顶部都留中文）",
+              all(f'"{k} /"' in en_text for k in ("工作台", "配置", "观测", "扩展", "系统")))
+        check("后端数据走 L() 双语，而不是塞进字典",
+              "function L(obj, key)" in app_js and "obj[key + '_en']" in app_js)
+        # 回归点：MutationObserver 的翻译派发曾经只挂 rAF，rAF 不触发时
+        # `_i18nBusy` 永远为 true，此后整页不再翻译（无头/后台标签页必现）。
+        check("i18n 派发不依赖 rAF 单独兜底",
+              "setTimeout(run, 50)" in i18n_js.text)
         h = c.get("/api/health").json()
         check("health 暴露 version", isinstance(h.get("version"), str) and h["version"],
               str(h.get("version")))

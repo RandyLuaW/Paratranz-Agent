@@ -19,6 +19,13 @@ from .paths import (
 
 @dataclass
 class ExtractorMeta:
+    """一个提取器的元信息。
+
+    `*_en` 系列是给英文界面用的第二份文案，缺了就回落中文（第三方导入的
+    提取器通常只有中文，这属于正常情况，不是错误）。`args` 里每项同理，
+    可带 `label_en` / `hint_en`。
+    """
+
     id: str
     name: str
     engine: str = "custom"
@@ -30,16 +37,22 @@ class ExtractorMeta:
     builtin: bool = False
     source: str = "imported"   # builtin / imported / agent
     path: str = ""
+    name_en: str = ""
+    desc_en: str = ""
+    input_hint_en: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
+            "name_en": self.name_en,
             "engine": self.engine,
             "version": self.version,
             "desc": self.desc,
+            "desc_en": self.desc_en,
             "entry": self.entry,
             "input_hint": self.input_hint,
+            "input_hint_en": self.input_hint_en,
             "args": self.args,
             "builtin": self.builtin,
             "source": self.source,
@@ -70,6 +83,9 @@ def _load_meta(path: Path) -> ExtractorMeta:
         input_hint=str(data.get("input_hint") or ""),
         args=list(data.get("args") or []),
         builtin=bool(data.get("builtin")),
+        name_en=str(data.get("name_en") or ""),
+        desc_en=str(data.get("desc_en") or ""),
+        input_hint_en=str(data.get("input_hint_en") or ""),
         # .agent 标记文件区分「Agent 生成」与「用户导入」
         source=(
             "builtin" if data.get("builtin")

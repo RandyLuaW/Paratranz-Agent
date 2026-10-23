@@ -1,23 +1,32 @@
 id: rpgmaker-mv
 name: RPG Maker MV/MZ
+name_en: RPG Maker MV/MZ
 engine: rpgmaker
 version: 1.0.0
 desc: 专扫 data/*.json：数据库名称与描述、地图/公共事件里的对话（code 401/405）、System 标题与术语。
+desc_en: "Scans data/*.json only: database names and descriptions, dialogue in map/common events (code 401/405), System title and terms."
 input_hint: 指向游戏根目录（含 www/data 或 data）
+input_hint_en: Point at the game root (containing www/data or data)
 entry: run.py
 builtin: true
 args:
   - name: min_len
     label: 最短长度
+    label_en: Min length
     default: "2"
   - name: max_len
     label: 最长长度
+    label_en: Max length
     default: "5000"
   - name: dialog
     label: 提取对话
+    label_en: Extract dialogue
     default: "1"
     hint: 1=提取事件对话（code 401/405），0=只要数据库字段
+    hint_en: 1 = extract event dialogue (code 401/405), 0 = database fields only
   - name: fields
     label: 提取字段
+    label_en: Extract fields
     default: "1"
     hint: 1=提取 name/description/profile 等，0=只要对话
+    hint_en: 1 = extract name/description/profile etc., 0 = dialogue only
