@@ -212,6 +212,7 @@ python -m ruff check --select F,E9,B,S102,S301,S307,S506,S608,ASYNC src tests sm
 
 CI 在 ubuntu + windows 上各跑 3.11 / 3.13 两版。仓库里还有几个真机验证工具（需要你自己的 Token，慎用）：
 
+- `tools/build_portable.py` —— 构建 Windows 免安装包（下载官方 embeddable Python + 打 zip + 出自检与 sha256），发版一条命令
 - `tools/realcheck.py` —— 真实平台体检：端点返回形态 / QA 规则分布 / 抽样复核 / stage 复位
 - `tools/verify_writeback_real.py` —— 回写全链路真机验证（自建临时文件，跑完自清）
 - `tools/check_spec_coverage.py` —— 用 AST 比对 `client.py` 与官方 OpenAPI spec，查打错端点/参数名
