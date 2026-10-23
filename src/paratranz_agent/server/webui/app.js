@@ -2409,7 +2409,7 @@ async function showExtractionDetail(main, jid) {
             <label class="switch"><input type="checkbox" id="up_force">
               <span>${t('强制上传（跳过校验错误）')}</span></label>
             <div class="notice" style="font-size:11.5px;margin-top:8px">
-              ${t('平台按项目格式解析上传内容：本项目格式若不是 JSON（如 twee、gettext），上传后可能建不出词条。所以务必先点「仅预览」看一眼内容。')}
+              ${t('上传会真的改平台数据、且不可撤回。实测把 {key: original} 的 JSON 传进 twee 项目也能正确建出词条，但不同项目格式没逐一验证——务必先点「仅预览」看一眼内容。')}
             </div>
           </div>
           <div id="up_preview"></div>

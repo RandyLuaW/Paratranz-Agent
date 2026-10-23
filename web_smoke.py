@@ -1564,8 +1564,10 @@ def main() -> int:
         check("「上传为新文件」有界面入口且已接线",
               'id="x_upload"' in app_js and "/upload" in app_js
               and "up_preview_btn" in app_js)
-        check("上传弹窗强制先预览（讲明格式假设）",
-              "本项目格式若不是 JSON" in app_js or "格式若不是 JSON" in app_js)
+        # 提示语要讲的是「不可撤回 + 先预览」，不能写未经证实的格式结论
+        # （曾写「非 json 项目会零词条」，实测 twee 项目能正常解析，已改）
+        check("上传弹窗强制先预览（讲明不可撤回）",
+              "不可撤回" in app_js and "仅预览" in app_js)
 
         print("\n== 入参边界（审计低危）==")
         check("limit 越界返回 422", c.get("/api/jobs?limit=0").status_code == 422

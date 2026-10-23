@@ -663,8 +663,8 @@ def tool_extraction_upload(
     - `extraction_import` 往**已有文件**里补 key（逐条 `POST /strings`，几千条要跑很久）；
     - 本工具新建一个文件，平台自己按项目格式解析并建词条（一次请求，快得多）。
 
-    前提是项目格式能吃这份内容：我们产出的是 `{key: original}` 的 JSON 对象，
-    `json` 格式的项目直接可用；其它格式（twee / gettext）解析不出词条 ——
+    内容形状是 `{key: original}` 的 JSON 对象。实测（2026-10-24，twee 项目 15382）
+    平台照扩展名解析、把词条原样建了出来；但不同项目格式没逐一验证，
     所以路由层强制先「预览」，把内容给用户看一眼再决定传不传。
     """
     from .extraction import export_upload_json, load_entries, normalize, validate

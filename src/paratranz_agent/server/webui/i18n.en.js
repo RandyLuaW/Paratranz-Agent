@@ -529,7 +529,6 @@ Object.assign(window.I18N.en, {
   "目标目录（可选，如 locale/）": "Target directory (optional, e.g. locale/)",
   "留空 = 项目根目录": "Empty = project root",
   "强制上传（跳过校验错误）": "Force upload (skip validation errors)",
-  "平台按项目格式解析上传内容：本项目格式若不是 JSON（如 twee、gettext），上传后可能建不出词条。所以务必先点「仅预览」看一眼内容。": "The platform parses uploads using the project format: if this project isn't JSON (e.g. twee, gettext), the upload may create no strings at all. Always click Preview first.",
   "条词条": "strings",
   "字节": "bytes",
   "上传": "Upload",
@@ -540,4 +539,6 @@ Object.assign(window.I18N.en, {
   "预览": "Preview",
 
   "（演练模式：只算不写）": " (dry run: computed only, nothing written)",
+
+  "上传会真的改平台数据、且不可撤回。实测把 {key: original} 的 JSON 传进 twee 项目也能正确建出词条，但不同项目格式没逐一验证——务必先点「仅预览」看一眼内容。": "An upload really changes platform data and cannot be undone. Uploading a {key: original} JSON into a twee project did create the strings correctly, but not every project format has been verified — always click Preview first.",
 });

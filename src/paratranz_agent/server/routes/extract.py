@@ -299,10 +299,9 @@ def register(app: FastAPI, d: Deps) -> None:
         与 `/import` 的区别：import 是往已有文件里补 key（逐条建词条，几千条要跑很久），
         本接口新建文件、由平台自己解析建词条（一次请求）。
 
-        **必须先预览**：我们产出的是 `{key: original}` 的 JSON 对象，只有 `json`
-        格式的项目能直接吃；twee / gettext 项目传上去会「成功但零词条」。
-        所以 `dry_run` 不只是友好，它是这个功能的正确用法 —— 不预览直接传，
-        等于把一个格式假设赌在平台上。
+        **必须先预览**：上传会不可撤回地改平台数据，而「这份内容平台能不能解析」
+        只取决文件本身、与项目设置的关系没验证完（实测 twee 项目也能吃 json）。
+        `dry_run` 因此不是可选项而是正确用法：先看内容，再决定传不传。
         """
         from ..extraction import (
             ExtractionError,
@@ -346,12 +345,19 @@ def register(app: FastAPI, d: Deps) -> None:
             "bytes": len(content),
             "merge": merge_stats,
             "preview": preview,
-            # 说明「这份内容为什么可能不适用于本项目」——别让用户以为一定成功
-            "note": "平台按项目格式解析上传内容。本项目格式若不是 JSON，"
-                    "上传后可能建不出词条；确认预览无误再上传。",
-            "note_en": "The platform parses uploads using the project format. If this "
-                       "project is not JSON, the upload may create no strings; "
-                       "check the preview before uploading.",
+            # 按实测说话：2026-10-24 在 twee 项目（15382）上真传过一次
+            # `{key: original}` 的 JSON，平台把 3 条词条原样建了出来、key 完全一致 ——
+            # 所以「非 json 项目会零词条」这个猜测是错的，解析看的是文件本身。
+            # 但仍要求先预览：不同项目格式的解析行为没逐一验证过，
+            # 上传是**不可撤回地改平台数据**，唯一能确认的办法就是看一眼内容。
+            "note": "上传前请先看一遍预览。实测把 {key: original} 的 JSON 传进 "
+                    "twee 项目也能正确建出词条（2026-10-24，项目 15382），"
+                    "但不同项目格式的解析行为没有逐一验证；上传会真的改平台数据，"
+                    "确认内容无误再传。",
+            "note_en": "Check the preview first. Uploading a {key: original} JSON into a "
+                       "twee project did create the strings correctly (2026-10-24, project "
+                       "15382), but parsing has not been verified for every project format; "
+                       "an upload really changes platform data, so confirm the content first.",
         }
 
     @app.post("/api/extract/analyze")
