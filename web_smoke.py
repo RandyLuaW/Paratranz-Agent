@@ -579,27 +579,32 @@ async function main() {
   await kb.ctx.renderData(kb.main);
   RES.epoch_data = { html: kb.main.innerHTML };
 
-  // ---- 场景 T：主题切换（<html data-theme> + localStorage + 侧栏按钮文案）
+  // ---- 场景 T：主题三态（<html data-theme> + data-theme-pref + localStorage）
   const tb = sandbox(async () => resp(true, 200, {}));
   await boot(tb, S_DEFAULT, []);
   const root = tb.doc.documentElement;
-  const themeBtn = tb.doc.querySelector('#themeToggle');
   RES.theme = {
     boot_theme: String(root.dataset.theme || ''),
-    boot_label: String(themeBtn.textContent),
+    boot_pref: String(root.dataset.themePref || ''),
     boot_stored: tb.ctx.localStorage.getItem('ptz-theme'),
   };
-  tb.ctx.applyTheme('light');                 // 等于用户点了一下
+  tb.ctx.applyTheme('light');                 // 等于用户在设置页点了「浅色」
   RES.theme.after_light = {
     theme: String(root.dataset.theme || ''),
+    pref: String(root.dataset.themePref || ''),
     stored: String(tb.ctx.localStorage.getItem('ptz-theme') || ''),
-    label: String(themeBtn.textContent),
   };
-  tb.ctx.toggleTheme();                       // 再点一下回到深色
+  tb.ctx.toggleTheme();                       // 快捷切换回到深色
   RES.theme.after_dark = {
     theme: String(root.dataset.theme || ''),
+    pref: String(root.dataset.themePref || ''),
     stored: String(tb.ctx.localStorage.getItem('ptz-theme') || ''),
-    label: String(themeBtn.textContent),
+  };
+  tb.ctx.applyTheme('system');                // 跟随系统
+  RES.theme.after_system = {
+    theme: String(root.dataset.theme || ''),
+    pref: String(root.dataset.themePref || ''),
+    stored: String(tb.ctx.localStorage.getItem('ptz-theme') || ''),
   };
 }
 
@@ -1428,17 +1433,21 @@ def main() -> int:
               pick("每日花费" not in wb_epoch_data and "概览" in wb_epoch_data,
                    "if (ep !== renderEpoch) return;" in app_js))
 
-        print("\n== 主题切换（深色 / 浅色）==")
+        print("\n== 主题（三态：跟随系统 / 深色 / 浅色）==")
         css = c.get("/static/style.css").text
         th = (wb or {}).get("theme") or {}
         check("index.html 在首帧前定主题",
               "ptz-theme" in index_html and "dataset.theme" in index_html
               and index_html.index("dataset.theme") < index_html.index("</head>"),
               "内联脚本位于 head")
-        check("侧栏有主题切换按钮",
-              'id="themeToggle"' in index_html
-              and index_html.index('id="nav"') < index_html.index('id="themeToggle"')
-              < index_html.index("</aside>"))
+        check("主题控件在设置页（三态分段）",
+              "data-theme-opt" in app_js
+              and "segBtn(tp, 'system'" in app_js
+              and "segBtn(tp, 'dark'" in app_js
+              and "segBtn(tp, 'light'" in app_js
+              and 'id="prefsTheme"' in app_js)
+        check("侧栏不再重复放主题开关（配置只出现一处）",
+              'id="themeToggle"' not in index_html)
         check("CSS 同时有暗色与浅色两套变量",
               ":root {" in css and ':root[data-theme="light"]' in css)
         light_css = css[css.index(':root[data-theme="light"]'):]
@@ -1450,22 +1459,65 @@ def main() -> int:
         css_body = re.sub(r':root(\[data-theme="light"\])?\s*\{[^}]*\}', "", css)
         literal = re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)", css_body)
         check("样式正文无字面色值（:root 之外）", not literal, str(literal[:6]))
-        check("切到浅色：dataset + localStorage + 按钮文案",
+        check("切到浅色：dataset + pref + localStorage",
               pick(th.get("after_light", {}).get("theme") == "light"
-                   and th.get("after_light", {}).get("stored") == "light"
-                   and "浅色" in (th.get("after_light", {}).get("label") or ""),
+                   and th.get("after_light", {}).get("pref") == "light"
+                   and th.get("after_light", {}).get("stored") == "light",
                    "localStorage.setItem(THEME_KEY" in app_js
                    and "function applyTheme" in app_js),
               wbd(str(th.get("after_light"))))
-        check("再点回深色",
+        check("再切回深色",
               pick(th.get("after_dark", {}).get("theme") == "dark"
-                   and th.get("after_dark", {}).get("stored") == "dark"
-                   and "深色" in (th.get("after_dark", {}).get("label") or ""),
+                   and th.get("after_dark", {}).get("stored") == "dark",
                    "function toggleTheme" in app_js),
               wbd(str(th.get("after_dark"))))
-        check("启动只同步按钮文案、不写死用户选择",
+        check("「跟随系统」解析成实际主题但仍记录 pref=system",
+              pick(th.get("after_system", {}).get("pref") == "system"
+                   and th.get("after_system", {}).get("stored") == "system"
+                   and th.get("after_system", {}).get("theme") in ("light", "dark"),
+                   "function systemTheme" in app_js),
+              wbd(str(th.get("after_system"))))
+        check("启动只同步、不写死用户选择",
               pick(th.get("boot_theme") == "dark" and th.get("boot_stored") is None,
-                   "applyTheme(themeCurrent(), false)" in app_js))
+                   "applyTheme(themePref(), false)" in app_js))
+
+        print("\n== 设置页（外观 / 语言 / 关于）==")
+        i18n_js = c.get("/static/i18n.js")
+        i18n_en = c.get("/static/i18n.en.js")
+        check("静态 i18n.js", i18n_js.status_code == 200, f"{len(i18n_js.text)} 字节")
+        check("静态 i18n.en.js", i18n_en.status_code == 200, f"{len(i18n_en.text)} 字节")
+        idx_i18n = index_html.index("/static/i18n.js")
+        idx_en = index_html.index("/static/i18n.en.js")
+        idx_app = index_html.index("/static/app.js")
+        check("脚本加载顺序：i18n → 词条 → app", idx_i18n < idx_en < idx_app)
+        check("侧栏有「设置」入口", 'data-view="prefs"' in index_html)
+        check("注册 prefs 视图并渲染",
+              "prefs:" in app_js and "function renderPrefs" in app_js
+              and "v === 'prefs'" in app_js)
+        check("设置页含外观 / 语言 / 关于三段",
+              all(k in app_js for k in ('id="prefsTheme"', 'id="prefsLang"',
+                                        "关于", "function aboutRow")))
+        check("关于段含作者 / 更新日志 / 仓库链接",
+              "github.com/RandyLuaW" in app_js and "/releases" in app_js
+              and "更新日志" in app_js and "AGPL" in app_js)
+        en_text = i18n_en.text
+        n_entries = en_text.count('": "')
+        check("英文词条数量足够（>=150）", n_entries >= 150, f"{n_entries} 条")
+        check("关键术语已翻译",
+              all(s in en_text for s in ('"概览": "Overview"', '"设置": "Settings"',
+                                         '"关于": "About"', '"外观": "Appearance"')))
+        check("i18n 提供 DOM 翻译与语言切换",
+              all(s in i18n_js.text for s in ("function translateDom", "function applyLang",
+                                              "function currentLang", "LANG_RULES")))
+        h = c.get("/api/health").json()
+        check("health 暴露 version", isinstance(h.get("version"), str) and h["version"],
+              str(h.get("version")))
+        ver_py = re.search(r'__version__\s*=\s*"([^"]+)"',
+                           (ROOT / "src/paratranz_agent/__init__.py").read_text(
+                               encoding="utf-8"))
+        check("版本号与包定义一致",
+              bool(ver_py) and h.get("version") == ver_py.group(1),
+              f"health={h.get('version')} pkg={ver_py.group(1) if ver_py else '?'}")
 
         # 顺手对一下后端契约：两条都只走校验分支，不起 job、不碰文件
         bad_stage = c.post(f"/api/extractions/{jid_x}/writeback", json={"min_stage": 4})

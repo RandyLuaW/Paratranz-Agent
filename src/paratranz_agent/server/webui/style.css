@@ -782,3 +782,57 @@ pre.result {
   display: flex; align-items: center; gap: 8px;
   padding-top: 7px; border-top: 1px solid var(--border);
 }
+
+/* ---------------------------------------------- 设置页：分段选择器 + 关于列表 */
+.segbar {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.segbar .seg {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.segbar .seg:hover { color: var(--text); }
+.segbar .seg.on {
+  background: var(--accent-bg);
+  color: var(--accent-soft-text);
+  font-weight: 600;
+}
+.aboutlist { display: flex; flex-direction: column; }
+.aboutrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 0;
+  border-top: 1px solid var(--border);
+}
+.aboutrow:first-child { border-top: 0; padding-top: 2px; }
+.abouttext { flex: 1; min-width: 0; }
+.abouttext b { font-size: 13px; font-weight: 600; }
+.aboutrow a.btn { text-decoration: none; }
+
+/* 「关于」里的链接按钮：复用 button.btn 的外观（原选择器只覆盖 button） */
+a.btn {
+  display: inline-block;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  padding: 5px 11px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  transition: border-color .12s, background .12s;
+}
+a.btn:hover { border-color: var(--accent); color: var(--accent); }
+a.btn.sm { padding: 3px 9px; font-size: 11.5px; }

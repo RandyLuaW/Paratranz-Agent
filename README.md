@@ -10,9 +10,9 @@
 [![Release](https://img.shields.io/github/v/release/RandyLuaW/Paratranz-Agent?color=76bad9)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
 
-简体中文 ｜ [WebUI 说明](WebUI说明.md) ｜ [**下载 Windows 免安装包**](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
+简体中文 ｜ [English](README.en.md) ｜ [WebUI 说明](WebUI说明.md) ｜ [**下载 Windows 免安装包**](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
 
 </div>
 
@@ -76,6 +76,7 @@
 - **可观测性**：实时日志（SSE）、任务队列、用量与花费统计、数据页（词条 / TM / 术语 / 账本）
 - **扩展位**：插件 / SKILL / MCP 三栏管理（预留接口）
 - **提示词可配置**：六个环节的 system prompt 均可在界面中替换，留空则使用内置默认值
+- **设置页**：外观（跟随系统 / 深色 / 浅色）、界面语言（简体中文 / English）与关于信息集中在一处
 
 ---
 
@@ -89,6 +90,9 @@
 <tr>
 <td><img src="docs/screenshots/extract-dark.png" alt="提取"><br/><sub><b>提取</b>：提取器管理、风险提示与提取记录</sub></td>
 <td><img src="docs/screenshots/models-dark.png" alt="模型"><br/><sub><b>模型</b>：源 → 模型 → 任务路由，三层结构</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/prefs-light.png" alt="设置"><br/><sub><b>设置</b>（English · 浅色主题）：外观三态、界面语言与关于信息</sub></td>
 </tr>
 </table>
 
@@ -181,6 +185,8 @@ ptz watch                        # 常驻守护：有任务即执行，无任务
 | 文档 | 内容 |
 | --- | --- |
 | [WebUI 说明](WebUI说明.md) | 各页面使用方法、两个安全开关、API 一览 |
+| [English README](README.en.md) | 英文版说明 |
+| [CHANGELOG](CHANGELOG.md) | 各版本改动 |
 | [config/agent.example.yaml](config/agent.example.yaml) | 配置文件模板（亦可在界面中完成配置） |
 | `ptz --help` / 各子命令 `--help` | 命令行用法（写操作默认 dry-run，需 `--yes`） |
 

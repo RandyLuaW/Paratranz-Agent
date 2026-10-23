@@ -68,6 +68,10 @@
     <rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/>
     <rect x="3" y="13" width="8" height="8" rx="2"/><path d="M17 13v8M13 17h8"/>
   </symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>
+  </symbol>
 </svg>
 
 <div id="app">
@@ -97,8 +101,10 @@
       <div class="navsep">扩展</div>
       <button data-view="extensions"><svg><use href="#i-ext"/></svg>插件与技能</button>
 
-      <button id="themeToggle" title="切换深色 / 浅色">☾ 深色</button>
-      <div class="foot" id="verFoot">v0.3.0</div>
+      <div class="navsep">系统</div>
+      <button data-view="prefs"><svg><use href="#i-settings"/></svg>设置</button>
+
+      <div class="foot" id="verFoot">—</div>
     </aside>
 
     <div class="mainwrap">
@@ -129,6 +135,8 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<script src="/static/i18n.js"></script>
+<script src="/static/i18n.en.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

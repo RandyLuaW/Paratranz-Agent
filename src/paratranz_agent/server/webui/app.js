@@ -61,6 +61,7 @@ const VIEWS = {
   logs:       { group: '观测',   name: '日志' },
   usage:      { group: '观测',   name: '开销' },
   extensions: { group: '扩展',   name: '插件与技能' },
+  prefs:      { group: '系统',   name: '设置' },
 };
 
 function setCrumb(view) {
@@ -88,7 +89,8 @@ function metric(k, v, opts) {
 let toastTimer = null;
 function toast(msg, isErr = false) {
   const el = $('#toast');
-  el.textContent = msg;
+  // toast 是渲染后动态生成的，不经过 render()，这里单独过一遍翻译
+  el.textContent = typeof trText === 'function' ? trText(String(msg)) : msg;
   el.className = 'toast show' + (isErr ? ' err' : '');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.className = 'toast'; }, 3200);
@@ -115,37 +117,69 @@ function fmtTime(ts) {
 }
 
 /* ------------------------------------------------------------------ 主题 */
-// 首帧的主题由 index.html 里的内联脚本先定好（避免闪一下深色），
-// 这里只负责：切换、持久化、把侧栏按钮的文案同步成当前主题。
+// 首帧的主题由 index.html 里的内联脚本先定好（避免闪一下深色）。
+// 三态：system（跟随系统）/ dark / light —— 存在 localStorage 的 ptz-theme。
 const THEME_KEY = 'ptz-theme';
 
+function themePref() {
+  let v = null;
+  try { v = localStorage.getItem(THEME_KEY); } catch { v = null; }
+  return v === 'light' || v === 'dark' || v === 'system' ? v : 'system';
+}
+
+function systemTheme() {
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light' : 'dark';
+}
+
+// 实际生效的主题（system 时解析成当前系统主题）
 function themeCurrent() {
-  const ds = document.documentElement && document.documentElement.dataset;
-  return ds && ds.theme === 'light' ? 'light' : 'dark';
+  const p = themePref();
+  return p === 'system' ? systemTheme() : p;
 }
 
-function themeLabel(t) {
-  return t === 'light' ? '☀ 浅色' : '☾ 深色';
-}
-
-// persist=false：启动时只同步按钮文案，不把「跟系统」的选择写死成用户选择
-function applyTheme(t, persist) {
-  const next = t === 'light' ? 'light' : 'dark';
+// persist=false：启动时只同步，不把「跟系统」写死成用户选择
+function applyTheme(pref, persist) {
+  const next = pref === 'light' || pref === 'dark' ? pref : 'system';
   const root = document.documentElement;
-  if (root && root.dataset) root.dataset.theme = next;
+  if (root && root.dataset) {
+    root.dataset.theme = next === 'system' ? systemTheme() : next;
+    root.dataset.themePref = next;
+  }
   if (persist !== false) {
     try { localStorage.setItem(THEME_KEY, next); } catch { /* 无痕模式写不了，不影响观感 */ }
-  }
-  const btn = $('#themeToggle');
-  if (btn) {
-    btn.textContent = themeLabel(next);
-    btn.title = next === 'light' ? '当前浅色 · 点击切到深色' : '当前深色 · 点击切到浅色';
   }
   return next;
 }
 
 function toggleTheme() {
   return applyTheme(themeCurrent() === 'light' ? 'dark' : 'light');
+}
+
+// 跟随系统时，操作系统切深浅色要立刻反映出来
+if (window.matchMedia) {
+  const mq = window.matchMedia('(prefers-color-scheme: light)');
+  const onChange = () => { if (themePref() === 'system') applyTheme('system', false); };
+  if (mq.addEventListener) mq.addEventListener('change', onChange);
+  else if (mq.addListener) mq.addListener(onChange);
+}
+
+/* ------------------------------------------------------ 语言（i18n 外壳） */
+// 静态区（侧栏 / 顶栏 / 日志面板）不经过 render()，单独翻一次；
+// 切换语言用整页重载：状态最少、不可能出现半中半英的残留。
+function applyChromeLang() {
+  if (typeof translateDom !== 'function') return;
+  const nav = $('#nav');
+  const top = $('.topbar');
+  const logp = $('#logPanel');
+  if (nav) translateDom(nav);
+  if (top) translateDom(top);
+  if (logp) translateDom(logp);
+  if (isEn()) document.title = 'Paratranz Agent · Console';
+}
+
+function setLang(lang) {
+  applyLang(lang, () => { window.location.reload(); });
 }
 
 /* ------------------------------------------------------------------ 日志 */
@@ -215,6 +249,9 @@ function render() {
   else if (v === 'logs') renderLogs(main);
   else if (v === 'usage') renderUsage(main);
   else if (v === 'extensions') renderExtensions(main);
+  else if (v === 'prefs') renderPrefs(main);
+  // 统一在 DOM 边界做英文替换：所有渲染器都不必关心 i18n
+  if (typeof translateDom === 'function') translateDom(main);
 }
 
 /* ------------------------------------------------------------------ 概览 */
@@ -582,6 +619,94 @@ function renderTools(main) {
 }
 
 /* ------------------------------------------------------------------ 设置 */
+/* ------------------------------------------------------------------ 设置 */
+function segBtn(cur, val, label, kind) {
+  const attr = kind === 'theme' ? 'data-theme-opt' : 'data-lang-opt';
+  return `<button type="button" class="seg${cur === val ? ' on' : ''}" ${attr}="${val}">${esc(label)}</button>`;
+}
+
+function aboutRow(label, desc, val, href, linkText) {
+  const right = href
+    ? `<a class="btn sm" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(linkText || label)}</a>`
+    : `<span class="mono dim">${esc(val || '')}</span>`;
+  return `<div class="aboutrow">
+    <div class="abouttext">
+      <b>${esc(label)}</b>
+      ${desc ? `<div class="muted" style="font-size:11.5px;margin-top:2px">${esc(desc)}</div>` : ''}
+    </div>
+    ${right}
+  </div>`;
+}
+
+function renderPrefs(main) {
+  const h = state.health || {};
+  const ver = h.version || '—';
+  const tp = themePref();
+  const lang = typeof currentLang === 'function' ? currentLang() : 'zh';
+  const repo = 'https://github.com/RandyLuaW/Paratranz-Agent';
+
+  main.innerHTML = `
+    ${pageHead('设置', '外观、语言与项目信息')}
+    <div class="grid c2">
+      <div class="card">
+        <h3 style="margin-top:0">外观</h3>
+        <div class="formrow">
+          <label class="lbl">主题</label>
+          <div class="segbar" id="prefsTheme">
+            ${segBtn(tp, 'system', '跟随系统', 'theme')}
+            ${segBtn(tp, 'dark', '深色', 'theme')}
+            ${segBtn(tp, 'light', '浅色', 'theme')}
+          </div>
+          <div class="muted" style="font-size:11.5px;margin-top:6px">
+            选择「跟随系统」时，切换操作系统的深色 / 浅色会立即生效。
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">语言</h3>
+        <div class="formrow">
+          <label class="lbl">界面语言</label>
+          <div class="segbar" id="prefsLang">
+            ${segBtn(lang, 'zh', '简体中文', 'lang')}
+            ${segBtn(lang, 'en', 'English', 'lang')}
+          </div>
+          <div class="muted" style="font-size:11.5px;margin-top:6px">
+            切换后页面会重载。项目内容、日志正文与模型返回保持原文，不做翻译。
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h3 style="margin-top:0">关于</h3>
+      <div class="aboutlist">
+        ${aboutRow('版本', '当前运行的构建版本', 'v' + ver)}
+        ${aboutRow('作者', '问题反馈与功能建议请走 issue', '', 'https://github.com/RandyLuaW', 'RandyLuaW')}
+        ${aboutRow('更新日志', '各版本的改动说明', '', repo + '/releases', 'Releases')}
+        ${aboutRow('源码仓库', 'AGPL-3.0 许可，欢迎提交 issue 与 PR', '', repo, 'GitHub')}
+      </div>
+    </div>`;
+
+  const themeBox = $('#prefsTheme');
+  if (themeBox) {
+    themeBox.onclick = (e) => {
+      const b = e.target.closest('[data-theme-opt]');
+      if (!b) return;
+      applyTheme(b.dataset.themeOpt, true);
+      render();               // 重画选中态
+    };
+  }
+  const langBox = $('#prefsLang');
+  if (langBox) {
+    langBox.onclick = (e) => {
+      const b = e.target.closest('[data-lang-opt]');
+      if (!b) return;
+      setLang(b.dataset.langOpt);
+    };
+  }
+}
+
 function renderSettings(main) {
   const s = state.settings || {};
   main.innerHTML = `
@@ -3098,16 +3223,14 @@ function mcpAddForm() {
 
 /* ------------------------------------------------------------------ 启动 */
 async function boot() {
-  // 主题：首帧已经由 index.html 定好，这里只把按钮文案对齐 + 绑切换
-  applyTheme(themeCurrent(), false);
-  const themeBtn = $('#themeToggle');
-  if (themeBtn) themeBtn.onclick = () => toggleTheme();
+  // 主题：首帧已经由 index.html 定好，这里只把 dataset 对齐（含 system 解析）
+  applyTheme(themePref(), false);
 
   // 日志抽屉
   $('#logHead').onclick = () => {
     const p = $('#logPanel');
     p.classList.toggle('collapsed');
-    $('#logToggle').textContent = p.classList.contains('collapsed') ? '展开' : '收起';
+    $('#logToggle').textContent = p.classList.contains('collapsed') ? t('展开') : t('收起');
   };
 
   // 演练模式
@@ -3144,6 +3267,9 @@ async function boot() {
     mockMode = !!health.mock;
     state.health = health;
     state.llmReady = !!health.llm;
+    // 侧栏页脚与「关于」都读后端版本，避免和 pyproject 脱节
+    const foot = $('#verFoot');
+    if (foot) foot.textContent = health.version ? 'v' + health.version : '—';
     if (mockMode) {
       document.querySelector('.brand').title = '演示模式：内置假平台，不碰真实项目';
       document.querySelector('.brand').insertAdjacentHTML(
@@ -3152,6 +3278,11 @@ async function boot() {
   } catch (e) {
     toast('后端不可达：' + e.message, true);
   }
+
+  // 静态区（侧栏 / 顶栏 / 日志面板）的英文替换
+  applyChromeLang();
+  // 异步渲染出来的节点靠观察器兜底
+  if (typeof startI18nWatcher === 'function') startI18nWatcher();
 
   connectSSE();
   pushLog({ msg: '控制台已连接，等待操作…', level: 'info' });

@@ -176,9 +176,12 @@ def create_app(
     # ------------------------------------------------------------------ 基础
     @app.get("/api/health")
     def health() -> dict:
+        from .. import __version__
+
         s = store.load()
         return {
             "ok": True,
+            "version": __version__,
             "mock": mock,
             "configured": mock or bool(s.token and s.project_id),
             "project_id": s.project_id,
