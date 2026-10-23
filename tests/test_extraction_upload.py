@@ -92,7 +92,12 @@ def test_upload_rejects_non_json_filename(client):
 
 
 def test_upload_submits_job_and_creates_file(client):
-    """正式上传走 job（与导入一致），平台侧真的建出文件与词条。"""
+    """正式上传走 job（与导入一致），平台侧真的建出文件与词条。
+
+    演练模式（`dry_run`）默认是开的，所以要真写就先关掉它 —— 这本身就是
+    「全局开关对 job 入口也生效」的证据（见下一个用例）。
+    """
+    client.put("/api/settings", json={"dry_run": False})
     r = client.post(f"/api/extractions/{JID}/upload", json={"filename": "brand-new.json"})
     assert r.status_code == 200
     jid = r.json()["job"]["id"]
@@ -116,3 +121,20 @@ def test_upload_tool_is_registered_and_writes():
     assert spec is not None, "upload 工具没进 TOOL_SPECS"
     assert spec["writes"] is True, "它会写平台，必须标成写操作（前端要二次确认）"
     assert spec["label_en"] and spec["description_en"], "英文界面要能显示"
+
+
+def test_upload_job_respects_global_dry_run(client):
+    """演练模式开着时，走 job 入口的上传也只算不写（不能绕过全局开关）。"""
+    assert client.get("/api/settings").json()["settings"]["dry_run"] is True
+    r = client.post(f"/api/extractions/{JID}/upload", json={"filename": "dry.json"})
+    jid = r.json()["job"]["id"]
+    for _ in range(200):
+        job = client.get(f"/api/jobs/{jid}").json()["job"]
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    assert job["status"] == "done", job
+    assert job["result"]["dry_run"] is True
+    assert job["result"]["uploaded"] == 0 and job["result"]["would_upload"] == 2
+    files = client.get("/api/files").json()["files"]
+    assert not any(f["name"] == "dry.json" for f in files), "演练模式却真的建了文件"

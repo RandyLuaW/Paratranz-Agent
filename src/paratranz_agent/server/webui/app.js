@@ -2457,7 +2457,9 @@ async function showExtractionDetail(main, jid) {
         try {
           const r = await api('POST', `/api/extractions/${jid}/upload`, payload());
           el.remove();
-          toast(t('已提交上传任务') + ` ${r.job ? r.job.id : ''}` + t('，跑完自动加载结果…'));
+          toast(t('已提交上传任务') + ` ${r.job ? r.job.id : ''}`
+            + t('，跑完自动加载结果…')
+            + ((state.settings || {}).dry_run ? t('（演练模式：只算不写）') : ''));
         } catch (e) {
           $('#up_msg', el).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
         }
@@ -2548,7 +2550,8 @@ async function showExtractionDetail(main, jid) {
           el.remove();
           // 正式导入只提交 job，取材/校验/写入都在 job 里做一次；
           // 条数由任务结果给出（原先接口返回的 sent 是路由自己算的重复 prep）
-          toast(`已提交导入任务 ${r.job ? r.job.id : ''}，跑完自动加载结果…`);
+          toast(`已提交导入任务 ${r.job ? r.job.id : ''}，跑完自动加载结果…`
+            + ((state.settings || {}).dry_run ? '（演练模式：只算不写）' : ''));
         } catch (e) {
           $('#imp_msg', el).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
         }

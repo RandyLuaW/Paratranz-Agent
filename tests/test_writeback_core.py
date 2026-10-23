@@ -99,7 +99,8 @@ def test_tool_writeback_requires_accept_risk_for_in_place(client, fake, game, tm
 
     job = _make_job(tmp_path, game, [("data/x.json::0.name", "Alice")])
     _seed_platform(fake, [{"key": "data/x.json::0.name", "original": "Alice", "translation": "爱丽丝"}])
-    ctx = SimpleNamespace(client=client, state_dir=tmp_path)
+    # 工具层现在会先过 _guard（凭据/演练模式），假 ctx 也要带 mock 标记
+    ctx = SimpleNamespace(client=client, state_dir=tmp_path, mock=True)
 
     with pytest.raises(PermissionError, match="accept_risk"):
         tool_writeback(ctx, extraction_id=job, in_place=True, accept_risk=False, dry_run=False)
@@ -122,7 +123,8 @@ def test_tool_writeback_dry_run_does_not_need_risk(client, fake, game, tmp_path)
 
     job = _make_job(tmp_path, game, [("data/x.json::0.name", "Alice")])
     _seed_platform(fake, [{"key": "data/x.json::0.name", "original": "Alice", "translation": "爱丽丝"}])
-    ctx = SimpleNamespace(client=client, state_dir=tmp_path)
+    # 工具层现在会先过 _guard（凭据/演练模式），假 ctx 也要带 mock 标记
+    ctx = SimpleNamespace(client=client, state_dir=tmp_path, mock=True)
     rep = tool_writeback(ctx, extraction_id=job, in_place=True, accept_risk=False, dry_run=True)
     assert rep["written"] == 1 and rep["dry_run"] is True
     assert json.loads((game / "data" / "x.json").read_text(encoding="utf-8"))["0"]["name"] == "Alice"

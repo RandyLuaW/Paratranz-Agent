@@ -538,4 +538,6 @@ Object.assign(window.I18N.en, {
   "，跑完自动加载结果…": " — results load automatically when it finishes…",
 
   "预览": "Preview",
+
+  "（演练模式：只算不写）": " (dry run: computed only, nothing written)",
 });

@@ -105,8 +105,10 @@ def test_writeback_store_rejects_dot_paths(tmp_path):
     p = save_last(tmp_path, "20261024-001122-abcd", {"written": 1})
     assert p.is_file()
     assert load_last(tmp_path, "20261024-001122-abcd")["report"]["written"] == 1
-    # 写入侧对畸形 id 直接拒绝
-    with pytest.raises(Exception):
+    # 写入侧对畸形 id 直接拒绝（ExtractionError，不是任何异常都算）
+    from paratranz_agent.server.extraction import ExtractionError
+
+    with pytest.raises(ExtractionError):
         save_last(tmp_path, "..", {"written": 1})
 
 

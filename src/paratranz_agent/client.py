@@ -78,21 +78,34 @@ class RateLimiter:
             time.sleep(min(wait, 5.0))
 
 
-def unwrap_page(data: Any) -> list[Any]:
+def unwrap_page(data: Any, *, path: str = "") -> list[Any]:
     """平台分页接口返回 `{results, page, pageSize, rowCount, pageCount}`。
 
     `/files` 等少数接口直接返回裸数组。这里统一成 list，
     否则 `for x in data` 会遍历到字典的 key（真实踩过：
     status 崩在 `StringItem.model_validate('results')`）。
+
+    **认不出来的形状要报错，不能返回空列表**：空列表在下游等价于「这个项目
+    一条数据都没有」，于是平台一改 envelope 字段名，界面就显示「0 条词条」
+    而不是「客户端不认这个响应」。空字典/None 才是真的没有数据。
     """
     if isinstance(data, list):
         return data
+    if data is None or (isinstance(data, dict) and not data):
+        return []
     if isinstance(data, dict):
         for key in ("results", "items", "data", "rows"):
             v = data.get(key)
             if isinstance(v, list):
                 return v
-    return []
+        raise ParaTranzError(
+            0,
+            "无法识别的列表响应（键：" + "、".join(sorted(map(str, data)))[:120] + "）",
+            path or "(unknown)",
+        )
+    raise ParaTranzError(
+        0, f"无法识别的响应类型：{type(data).__name__}", path or "(unknown)"
+    )
 
 
 def _unwrap_file(data: Any) -> dict:
@@ -479,6 +492,15 @@ class ParaTranzClient:
                 sid = (res or {}).get("id") if isinstance(res, dict) else None
                 if sid:
                     created.append(int(sid))
+                else:
+                    # 2xx 却拿不到 id：这条既不能算成功（不知道建成什么）也不能
+                    # 悄悄丢掉 —— 否则「提交 N 条、created+failed 少于 N」，
+                    # 没人看得出少的那几条去哪了。
+                    failed.append({
+                        "key": body["key"],
+                        "error": "平台返回 2xx 但响应体里没有 id，无法确认是否已创建"
+                                 f"（{type(res).__name__}）",
+                    })
             if on_progress and (idx % 20 == 0 or idx == len(items)):
                 on_progress(idx, len(items))
         return {"created": created, "failed": failed}
@@ -499,20 +521,35 @@ class ParaTranzClient:
                 params={"scope": scope, "rate": rate},
                 retries=1,
             )
-        return data or []
+        return unwrap_page(
+            data, path=f"/projects/*/strings/{string_id}/suggestions"
+        )
 
     # ---------------------------------------------------------------- Terms
     def list_terms(self, page: int = 1, page_size: int = 500) -> list[Term]:
         data = self.request("GET", "/projects/{projectId}/terms", params={"page": page, "pageSize": page_size})
         return [Term.model_validate(x) for x in unwrap_page(data)]
 
-    def iter_terms(self, page_size: int = 500) -> Iterator[Term]:
+    def iter_terms(self, page_size: int = 500, max_pages: int = 400) -> Iterator[Term]:
+        """分页迭代术语。
+
+        与 `iter_strings` 同一套兜底：硬页数上限 + 重复 id 检测。
+        没有这两条时，平台一旦忽略 `page` 参数就**无限循环**（实测：一直请求
+        第 N 页），`sync_terms_from_platform` 会挂死，而用户只看到"卡住了"。
+        """
         page = 1
-        while True:
+        seen: set[int] = set()
+        while page <= max_pages:
             batch = self.list_terms(page=page, page_size=page_size)
             if not batch:
                 return
-            yield from batch
+            fresh = [t for t in batch if t.id not in seen]
+            if not fresh:
+                # 全是见过的 id → 平台没有真的翻页，停止而不是空转
+                return
+            for t in fresh:
+                seen.add(t.id)
+            yield from fresh
             if len(batch) < page_size:
                 return
             page += 1
@@ -614,6 +651,15 @@ class ParaTranzClient:
                 "PUT", f"/projects/{{projectId}}/tasks/{task_id}/strings",
                 json_body={"op": op, "items": ids[i : i + TASK_STRING_LIMIT]},
             ) or {}
+            if not isinstance(res, dict) or not (set(total) & set(res)):
+                # 空 dict / 形状不认识时按 0 累计，就等于「平台说加了 0 条」——
+                # 而实际情况是"我们没看懂它的回应"。这两件事必须区分。
+                raise ParaTranzError(
+                    0,
+                    "任务词条操作返回了无法识别的结果（键："
+                    + "、".join(sorted(map(str, res)))[:120] + "）",
+                    f"/projects/*/tasks/{task_id}/strings",
+                )
             for k in total:
                 total[k] += int(res.get(k, 0) or 0)
         return total

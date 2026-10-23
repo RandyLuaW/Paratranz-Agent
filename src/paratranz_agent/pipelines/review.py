@@ -458,7 +458,7 @@ class ReviewPipeline:
             by_id = {s.id: s for s in targets}
             body = self._digest_markdown(dispute_ids, by_id, reasons, stats)
             try:
-                existing = self._find_digest_thread()
+                existing = self._find_digest_thread(stats)
                 if existing is not None:
                     res = self.client.reply_issue(int(existing["id"]), body)
                     stats.issue_action = "reply"
@@ -477,12 +477,23 @@ class ReviewPipeline:
 
     # ---------------------------------------------------------------- 帖子
 
-    def _find_digest_thread(self) -> dict | None:
-        """在「讨论中」的列表里找自己的打回台账帖。找不到/接口不可用都返回 None。"""
+    def _find_digest_thread(self, stats: "ReviewStats | None" = None) -> dict | None:
+        """在「讨论中」的列表里找自己的打回台账帖。
+
+        查不到（真的没有）返回 None；**接口不可用也返回 None，但会留痕**：
+        这时新建帖子可能多出一条同名台账帖，和 styleguide 重复发公告是同一类
+        风险。区别在于这里不能中止 —— 校对本身已经做完了，为了发不发帖把整轮
+        结果废掉更亏。所以折中：照发，但把原因写进 `stats.issue_error`。
+        """
         try:
             issues = self.client.list_issues(status=0)
-        except Exception:  # noqa: BLE001
-            # 列表拉不到时宁可新建一条，也不要因为查不到就放弃发帖
+        except Exception as exc:  # noqa: BLE001
+            if stats is not None:
+                stats.issue_error = (
+                    "无法确认是否已有打回台账帖（"
+                    + f"{type(exc).__name__}: {str(exc)[:120]}"
+                    + "），本次可能新建了重复的一条"
+                )
             return None
         for it in issues:
             if str(it.get("title") or "").strip() == _DIGEST_TITLE:

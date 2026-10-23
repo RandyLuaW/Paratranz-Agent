@@ -321,15 +321,19 @@ def tool_status(ctx: AppContext, *, job=None, runner=None, **_: Any) -> dict:
     disputed = sum(f.disputed for f in files)
 
     tasks: list = []
+    tasks_error = ""
     try:
         tasks = ctx.client.list_tasks(page=1, page_size=20)
-    except Exception:  # noqa: BLE001 - 任务功能可能未开启
-        pass
+    except Exception as exc:  # noqa: BLE001 - 任务功能可能未开启
+        # 项目没开 task 功能时这里是正常的空；但其它失败（网络/权限）也会走到
+        # 这里。把它吞掉就等于报表里写「平台任务 0 个」—— 用户会以为真的没有。
+        tasks_error = f"{type(exc).__name__}: {exc}"
     terms = 0
+    terms_error = ""
     try:
         terms = sum(1 for _ in ctx.client.iter_terms())
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        terms_error = f"{type(exc).__name__}: {exc}"
 
     return {
         "project": {
@@ -357,6 +361,9 @@ def tool_status(ctx: AppContext, *, job=None, runner=None, **_: Any) -> dict:
         ],
         "terms": terms,
         "local_tm": ctx.store.tm_size(),
+        # 读不到就说读不到：0 和「没读出来」必须能区分
+        "tasks_error": tasks_error,
+        "terms_error": terms_error,
     }
 
 
@@ -563,6 +570,7 @@ def tool_extraction_import(
     extraction_id: str = "",
     file_id: int = 0,
     force: bool = False,
+    dry_run: bool | None = None,
     job=None,
     runner=None,
     **_: Any,
@@ -575,6 +583,10 @@ def tool_extraction_import(
     """
     from .extraction import load_entries, normalize, validate
 
+    # 闸门必须在本层：同一个工具还有 `POST /api/jobs {tool,args}` 与
+    # `/api/agent` 两个入口，只在路由校验等于没校验（审计高危 1 的同一类问题）。
+    _guard(ctx)
+    dry = _dry_of(ctx, {"dry_run": dry_run})
     if not extraction_id:
         raise ValueError("缺少 extraction_id")
     if not file_id:
@@ -603,7 +615,14 @@ def tool_extraction_import(
 
     if not to_create:
         log("没有需要新增的词条", level="warn")
-        return {"created": 0, "skipped": skipped, "failed": [], "total": len(merged)}
+        return {"created": 0, "skipped": skipped, "failed": [], "total": len(merged),
+                "dry_run": dry}
+
+    if dry:
+        # 演练模式：该拉该算的都做了，就是不写。返回的数字仍是事实（"会新增多少"）。
+        log("演练模式：不写入平台（将新增 " + str(len(to_create)) + " 条）", level="warn")
+        return {"created": 0, "would_create": len(to_create), "skipped": skipped,
+                "failed": [], "total": len(merged), "dry_run": True}
 
     res = ctx.client.create_strings(
         to_create,
@@ -633,6 +652,7 @@ def tool_extraction_upload(
     filename: str = "",
     path: str = "",
     force: bool = False,
+    dry_run: bool | None = None,
     job=None,
     runner=None,
     **_: Any,
@@ -649,6 +669,9 @@ def tool_extraction_upload(
     """
     from .extraction import export_upload_json, load_entries, normalize, validate
 
+    # 与 import 同理：闸门放本层，三个入口共用
+    _guard(ctx)
+    dry = _dry_of(ctx, {"dry_run": dry_run})
     if not extraction_id:
         raise ValueError("缺少 extraction_id")
     name = (filename or "").strip() or "extract.json"
@@ -673,12 +696,19 @@ def tool_extraction_upload(
         "准备上传 " + name + "：" + str(len(merged)) + " 条词条，"
         + str(len(content)) + " 字节" + ("，目录 " + path if path else "")
     )
+    if dry:
+        log("演练模式：不调用上传接口（内容 " + str(len(content)) + " 字节已就绪）",
+            level="warn")
+        return {"file": None, "uploaded": 0, "would_upload": len(merged),
+                "bytes": len(content), "dry_run": True}
+
     item = ctx.client.create_file(name, content, path=path or "")
     log(f"平台已建文件 id={item.id} name={item.name}", level="info")
     return {
         "file": {"id": item.id, "name": item.name, "path": path or ""},
         "uploaded": len(merged),
         "bytes": len(content),
+        "dry_run": False,
     }
 
 
@@ -758,7 +788,7 @@ def tool_writeback(
     mode: str = "mirror",
     in_place: bool = False,
     accept_risk: bool = False,
-    dry_run: bool = True,
+    dry_run: bool | None = None,
     platform_file: int = 0,
     job=None,
     runner=None,
@@ -772,9 +802,13 @@ def tool_writeback(
     """
     from ..writeback import WritebackError, run_writeback
 
+    _guard(ctx)
+    # 演练模式是全局开关：显式传参优先，没传就跟随设置页，
+    # 这样 `POST /api/jobs` 直投也不会绕过它。
+    dry = _dry_of(ctx, {"dry_run": dry_run})
     if not extraction_id:
         raise ValueError("缺少 extraction_id")
-    if in_place and not dry_run and not accept_risk:
+    if in_place and not dry and not accept_risk:
         raise PermissionError("原地修改游戏文件必须显式确认（accept_risk）")
 
     def log(msg: str, level: str = "info") -> None:
@@ -790,7 +824,7 @@ def tool_writeback(
             out_dir=out_dir,
             mode=mode or "mirror",
             in_place=bool(in_place),
-            dry_run=bool(dry_run),
+            dry_run=dry,
             platform_file=int(platform_file) or None,
             log=log,
         )

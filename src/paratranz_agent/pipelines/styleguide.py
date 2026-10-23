@@ -111,6 +111,16 @@ class StyleGuidePipeline:
             raise
         except LLMError:
             pass
+        return self._style_default()
+
+    def _style_default(self) -> str:
+        """不带模型的风格章节（内置模板）。
+
+        `with_llm=False` 时必须走这里：那个开关的含义就是「别调模型」，
+        而原来的实现无论如何都会进 `_style_section` 调一次 `llm.chat` ——
+        既白烧 token，又在没配模型时直接抛 `LLMNotConfigured` 把整条流水线
+        打断（用户明确说了不用模型，却因为"没配模型"失败，说不过去）。
+        """
         return (
             "### 语气\n\n"
             "- **对话**：口语自然，保留角色性格与口癖，避免书面化长句；一句一义，必要时断句。\n"
@@ -131,16 +141,23 @@ class StyleGuidePipeline:
         pct = (translated / total * 100) if total else 0.0
 
         samples: list[tuple[str, str]] = []
+        self._samples_error = ""
         try:
             for s in self.client.iter_strings(stage=5, max_items=200):
                 if s.translation.strip():
                     samples.append((s.original, s.translation))
                 if len(samples) >= 12:
                     break
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # 样例只是「风格章节的参考」，拉不到不该让整份规范生成失败；
+            # 但要留下痕迹：否则「没有已审核译文」和「读失败了」都会表现成
+            # 风格章节里空空的样例，事后没法区分。
+            self._samples_error = f"{type(exc).__name__}: {exc}"
 
-        style_section = self._style_section(kinds, samples) if with_llm else self._style_section(kinds, [])
+        # 关掉模型就真的不碰模型（见 _style_default 的说明）
+        style_section = (
+            self._style_section(kinds, samples) if with_llm else self._style_default()
+        )
         today = _dt.date.today().isoformat()
         kind_line = "、".join(f"`{k}` × {v}" for k, v in kinds.most_common(8)) or "—"
 
@@ -316,4 +333,8 @@ class StyleGuidePipeline:
             self.store.ledger_mark(self.name, str(ann.id), "create", title)
             action, ann_id = "create", ann.id
         self.store.ledger_commit()
-        return {"title": title, "action": action, "id": ann_id, "dry_run": False, "length": len(md)}
+        return {
+            "title": title, "action": action, "id": ann_id, "dry_run": False, "length": len(md),
+            # 非空表示「风格样例没取到」，规范正文里那一段会是空的
+            "samples_error": getattr(self, "_samples_error", ""),
+        }
