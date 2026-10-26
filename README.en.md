@@ -208,11 +208,21 @@ CI runs Python 3.11 and 3.13 on both ubuntu and windows. The repository also shi
 
 ---
 
-## ⚖️ Disclaimer
+## ⚖️ Disclaimer and Free-of-Charge Notice
+
+### Scope of liability
 
 This project is a **third-party tool** and is not affiliated with ParaTranz. It calls the ParaTranz API under the user's identity, so please confirm your project permissions and the platform's terms yourself.
 
-Dangerous actions — running extractor scripts, rewriting game files in place, and issuing write requests against a real project — all require explicit confirmation, and **the user bears the consequences**. Validate in `--mock` demo mode or on an idle project before using the tool on a production project.
+Destructive actions (running extractor scripts, rewriting game files in place, sending write requests to a real project) all require explicit user confirmation, and **you bear the consequences**. Validate them in `--mock` demo mode or on an idle project before using a live one.
+
+### This software is completely free
+
+This software is **completely free of charge**. The only official distribution channel is this repository: <https://github.com/RandyLuaW/Paratranz-Agent>.
+
+If you obtained it through any paid channel (paid download sites, resold bundles, paid installation services, "members-only" collections), please request a refund immediately and download it from the Releases page at no cost. The official repository never charges you, and there is no "activation code", "license key", or "insider build" to buy.
+
+The same notice appears in the console on first launch (bilingual), and permanently under Settings → About. Full text: [`NOTICE.txt`](NOTICE.txt); the portable package also ships `免费声明.txt`.
 
 ---
 
