@@ -43,6 +43,21 @@ def register(app: FastAPI, d: Deps) -> None:
     def tools() -> dict:
         return {"tools": TOOL_SPECS}
 
+    @app.get("/api/notice")
+    def get_notice() -> dict:
+        """首次启动的免费声明：`pending=true` 时前端弹一次，确认后不再弹。"""
+        from ..notice import payload
+
+        return payload(d.ctx.state_dir)
+
+    @app.post("/api/notice/ack")
+    def ack_notice() -> dict:
+        """记下「已确认」。幂等：重复调用只是再写一次同样的标记。"""
+        from ..notice import acknowledge, payload
+
+        acknowledge(d.ctx.state_dir)
+        return {"ok": True, **payload(d.ctx.state_dir)}
+
     @app.get("/api/events")
     async def events(request: Request) -> StreamingResponse:
         q = bus.subscribe()

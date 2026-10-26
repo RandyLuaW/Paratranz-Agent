@@ -1569,6 +1569,22 @@ def main() -> int:
         check("上传弹窗强制先预览（讲明不可撤回）",
               "不可撤回" in app_js and "仅预览" in app_js)
 
+        print("\n== 免费声明 ==")
+        nt = c.get("/api/notice")
+        check("免费声明接口可用", nt.status_code == 200)
+        nbody = nt.json()
+        check("首次启动需要弹窗", nbody["pending"] is True)
+        check("声明中英双语都给",
+              "完全免费" in nbody["text_zh"] and "completely free" in nbody["text_en"].lower())
+        check("声明给出官方仓库",
+              nbody["repo"] == "https://github.com/RandyLuaW/Paratranz-Agent")
+        check("弹窗函数与两段文案都已接线",
+              "freeNoticeDialog" in app_js and "info.text_zh" in app_js
+              and "info.text_en" in app_js)
+        check("关于页留有常驻入口", "免费声明" in app_js)
+        check("确认后不再弹", c.post("/api/notice/ack").json()["pending"] is False
+              and c.get("/api/notice").json()["pending"] is False)
+
         print("\n== 入参边界（审计低危）==")
         check("limit 越界返回 422", c.get("/api/jobs?limit=0").status_code == 422
               and c.get("/api/jobs?limit=-1").status_code == 422)

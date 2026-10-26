@@ -1,0 +1,37 @@
+Paratranz Agent —— 免费声明 / Free Software Notice
+====================================================
+
+【中文】
+
+本软件完全免费，不以任何形式收费。
+
+本软件的唯一官方发布渠道是 GitHub 仓库：
+    https://github.com/RandyLuaW/Paratranz-Agent
+
+如果您通过任何付费渠道（包括但不限于付费下载站、资源包售卖、代安装服务、
+"会员专享"合集等）取得本软件，请立即申请退款，然后访问上述官方仓库，
+从 Releases 页面免费获取软件本体。
+
+官方仓库不会向您收取任何费用，也不需要任何"激活""授权码""内部版本"。
+
+
+【English】
+
+This software is completely free of charge.
+
+The only official distribution channel is the GitHub repository:
+    https://github.com/RandyLuaW/Paratranz-Agent
+
+If you obtained this software through any paid channel (including but not
+limited to paid download sites, resold bundles, paid installation services,
+or "members-only" collections), please request a refund immediately, then
+visit the official repository above and download the software from the
+Releases page at no cost.
+
+The official repository never charges you, and there is no "activation",
+"license key", or "insider build" to buy.
+
+
+------------------------------------------------------------------
+许可 / License: AGPL-3.0
+仓库 / Repository: https://github.com/RandyLuaW/Paratranz-Agent

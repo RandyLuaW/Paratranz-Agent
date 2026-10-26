@@ -149,6 +149,12 @@ def write_extras(stage: Path) -> None:
     lic = ROOT / "LICENSE"
     if lic.exists():
         shutil.copy2(lic, stage / "LICENSE.txt")
+    # 免费声明必须跟着包走：这段文字就是给「从付费渠道拿到包的人」看的。
+    # 换行统一 CRLF + BOM，Windows 记事本双击打开不会乱码。
+    notice = ROOT / "NOTICE.txt"
+    if notice.exists():
+        text = notice.read_text(encoding="utf-8").replace("\r\n", "\n")
+        (stage / "免费声明.txt").write_text(text.replace("\n", "\r\n"), encoding="utf-8-sig")
     guide = ROOT / "docs" / "portable-quickstart.txt"
     if guide.exists():
         # 带 BOM：Windows 记事本才不会把中文认成乱码

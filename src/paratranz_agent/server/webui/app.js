@@ -705,6 +705,8 @@ function renderPrefs(main) {
         ${aboutRow('作者', '问题反馈与功能建议请走 issue', '', 'https://github.com/RandyLuaW', 'RandyLuaW')}
         ${aboutRow('更新日志', '各版本的改动说明', '', repo + '/releases', 'Releases')}
         ${aboutRow('源码仓库', 'AGPL-3.0 许可，欢迎提交 issue 与 PR', '', repo, 'GitHub')}
+        ${aboutRow('免费声明', '本软件完全免费；若通过付费渠道取得请立即退款并到官方仓库获取',
+                   '', repo, '官方仓库')}
       </div>
     </div>`;
 
@@ -1809,6 +1811,45 @@ function askConfirm(message) {
       done(false);
     });
   });
+}
+
+/* 首次启动的免费声明。文案与仓库地址由后端给（`GET /api/notice`），
+ * 中英两段**同时**展示：这是给"从付费渠道拿到软件的人"看的，不该因为
+ * 界面语言是英文就漏掉中文原文。 */
+function freeNoticeDialog(info) {
+  const el = document.createElement('div');
+  el.className = 'modal';
+  el.innerHTML = `
+    <div class="modal-box" style="width:min(600px,94vw)">
+      <div class="modal-head"><b>${t('本软件完全免费')} · Free of charge</b></div>
+      <div class="modal-body">
+        <div class="notice safe" style="margin-bottom:12px;font-size:13px;line-height:1.75">
+          <div class="dim mono" style="font-size:10.5px;margin-bottom:4px">中文</div>
+          <div>${esc(info.text_zh || '')}</div>
+          <div class="dim mono" style="font-size:10.5px;margin:10px 0 4px">English</div>
+          <div>${esc(info.text_en || '')}</div>
+        </div>
+        <div style="font-size:12px;line-height:1.8">
+          <div>${t('官方仓库')}${isEn() ? ': ' : '：'}
+            <a href="${esc(info.repo || '')}" target="_blank" rel="noopener noreferrer">${esc(info.repo || '')}</a>
+          </div>
+          <div class="dim">${t('随包还附有说明文件')}：<code>${esc(info.notice_file || 'NOTICE.txt')}</code>
+            （${t('本提示只在这台机器首次启动时出现一次')}）</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <div class="spacer"></div>
+        <button class="btn primary" id="fn_ok">${t('我知道了')}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(el);
+  const close = () => {
+    el.remove();
+    // 记到后端（按这台机器算"看过"）；失败也不打扰用户，下次再弹一次而已
+    api('POST', '/api/notice/ack').catch(() => {});
+  };
+  el.querySelector('#fn_ok').onclick = close;
+  el.onclick = (ev) => { if (ev.target === el) close(); };
 }
 
 /* ================================================================== 提取 */
@@ -3452,6 +3493,12 @@ async function boot() {
   } catch (e) {
     toast('后端不可达：' + e.message, true);
   }
+
+  // 首次启动的免费声明：只在这台机器第一次打开时弹一次
+  try {
+    const notice = await api('GET', '/api/notice');
+    if (notice && notice.pending) freeNoticeDialog(notice);
+  } catch { /* 拉不到就不弹，不挡用户 */ }
 
   // 静态区（侧栏 / 顶栏 / 日志面板）的英文替换
   applyChromeLang();

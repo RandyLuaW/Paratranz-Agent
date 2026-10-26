@@ -541,4 +541,12 @@ Object.assign(window.I18N.en, {
   "（演练模式：只算不写）": " (dry run: computed only, nothing written)",
 
   "上传会真的改平台数据、且不可撤回。实测把 {key: original} 的 JSON 传进 twee 项目也能正确建出词条，但不同项目格式没逐一验证——务必先点「仅预览」看一眼内容。": "An upload really changes platform data and cannot be undone. Uploading a {key: original} JSON into a twee project did create the strings correctly, but not every project format has been verified — always click Preview first.",
+
+  "本软件完全免费": "This software is completely free",
+  "官方仓库": "Official repository",
+  "随包还附有说明文件": "A notice file also ships with the package",
+  "本提示只在这台机器首次启动时出现一次": "this notice appears once, on first launch on this machine",
+  "我知道了": "Got it",
+  "免费声明": "Free-of-charge notice",
+  "本软件完全免费；若通过付费渠道取得请立即退款并到官方仓库获取": "This software is completely free; if you paid for it, request a refund and get it from the official repository",
 });

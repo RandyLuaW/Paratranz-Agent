@@ -4,6 +4,9 @@ Paratranz Agent · Windows 免安装版
 解压即用，不需要装 Python，也不需要联网安装依赖。
 
 
+【本软件完全免费】若您是付费取得（下载站/资源包/代安装等），请立即退款，并到官方仓库免费获取：https://github.com/RandyLuaW/Paratranz-Agent
+详见包内「免费声明.txt」。
+
 一、这是什么
 ------------
 让 AI Agent 接管 ParaTranz 汉化项目的全流程：

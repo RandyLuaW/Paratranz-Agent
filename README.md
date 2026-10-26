@@ -219,6 +219,16 @@ CI 在 ubuntu 与 windows 上分别执行 Python 3.11 / 3.13 两版。仓库另�
 
 ---
 
+## 💰 免费声明
+
+本软件**完全免费**，不以任何形式收费。唯一官方发布渠道为本仓库：<https://github.com/RandyLuaW/Paratranz-Agent>。
+
+若通过任何付费渠道（付费下载站、资源包售卖、代安装服务、"会员专享"合集等）取得本软件，请立即申请退款，并从上方的 Releases 页面免费获取软件本体。官方仓库不会收取任何费用，也不存在需要购买的"激活码""授权码"或"内部版本"。
+
+软件首次启动时会在控制台显示同一份声明（中英双语），设置页「关于」中另保留入口。完整文本见 [`NOTICE.txt`](NOTICE.txt)，免安装包内另附 `免费声明.txt`。
+
+---
+
 ## 📄 License
 
 [GNU Affero General Public License v3.0](LICENSE)
