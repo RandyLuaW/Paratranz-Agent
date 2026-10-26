@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 from .config import AgentConfig, load_config
 from .models import Stage, StringItem, Task, Term

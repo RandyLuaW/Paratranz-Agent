@@ -1,6 +1,6 @@
 [project]
 name = "paratranz-agent"
-version = "0.3.1"
+version = "0.3.2"
 license = { file = "LICENSE" }
 license-files = ["LICENSE", "NOTICE.txt", "THIRD-PARTY-LICENSES.txt"]
 description = "Agent-driven automation for ParaTranz localization projects: task planning, MT, review, glossary, style guide"
