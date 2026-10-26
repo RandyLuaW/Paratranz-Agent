@@ -102,3 +102,36 @@ def test_ui_wires_modal_and_about_row():
     assert "info.text_zh" in app_js and "info.text_en" in app_js
     # 关于页常驻入口，错过弹窗也能查
     assert "免费声明" in app_js
+
+
+# ------------------------------------------------- 许可条款不许被静默删掉
+def test_license_keeps_key_clauses():
+    """许可里每一条都是"删掉就少一层保护"，用断言盯住。
+
+    历史：这几个条款是分两次加上的——先是禁止付费网络服务与署名要求，
+    后补专利授权、30 日补救期与商业授权渠道。没有断言时，任何一次文档
+    重写都可能把它们悄悄读掉。
+    """
+    text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    musts = {
+        "免费分发授权": "free of charge",
+        "署名要求": "ATTRIBUTION",
+        "官方仓库链接要求": "https://github.com/RandyLuaW/Paratranz-Agent",
+        "禁止付费网络服务": "NO PAID NETWORK SERVICE",
+        "保留权利": "not expressly granted",
+        "专利授权": "PATENT LICENSE",
+        "违约补救期": "30 days after receiving written notice",
+        "商业授权渠道": "COMMERCIAL AND ALTERNATIVE LICENSING",
+        "中文对照存在": "商业与替代授权",
+        "版本号": "版本 1.1",
+    }
+    missing = [label for label, kw in musts.items() if kw not in text]
+    assert not missing, f"LICENSE 缺少条款：{missing}"
+
+
+def test_readmes_mention_commercial_license():
+    """两个 README 都要给出"想收费就来谈"的出口，否则读者只会看到禁止。"""
+    zh = (ROOT / "README.md").read_text(encoding="utf-8")
+    en = (ROOT / "README.en.md").read_text(encoding="utf-8")
+    assert "商业授权" in zh and "书面授权" in zh
+    assert "commercial or alternative license" in en.lower()

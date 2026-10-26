@@ -1,7 +1,7 @@
 Paratranz Agent 源码许可 / Source Code License
 ==============================================
 
-版本 1.0 · 2026-10-26
+版本 1.1 · 2026-10-26（1.1：增加专利授权、违约补救期与商业授权渠道）
 Copyright (c) 2026 RandyLuaW. All rights reserved except as expressly granted below.
 
 本文件为英文正文与中文对照。若两者存在歧义，以**英文正文**为准。
@@ -84,18 +84,44 @@ LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
 CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-7. TERMINATION
+7. TERMINATION AND CURE
 
 Any breach of Section 2 or Section 3 terminates the rights granted to you under
 this license automatically. On termination you must stop distributing and stop
-operating the software as a service. The author may grant a written exception on
-a case-by-case basis.
+operating the software as a service.
+
+Except in cases of wilful or grossly negligent breach, if you cure the breach
+completely within 30 days after receiving written notice of it from the author,
+the rights granted to you under this license are reinstated as of the date of
+cure. The author may also grant a written exception on a case-by-case basis.
 
 8. VERSIONS ALREADY RELEASED
 
 Copies of earlier releases that were distributed under a different license
 remain governed by the license that accompanied them. This license applies to
 this version and to later versions released under it.
+
+9. PATENT LICENSE
+
+Each contributor grants you a non-exclusive, worldwide, royalty-free patent
+license to make, use, sell, offer for sale, import and otherwise run, modify and
+propagate the contents of their contribution, under any patent claims that the
+contributor can license and that are necessarily infringed by their contribution
+alone or by combination of their contribution with this software.
+
+If you institute patent litigation against the author or any contributor
+(including a cross-claim or counterclaim in a lawsuit) alleging that this
+software infringes a patent, then any patent license granted to you under this
+license for this software terminates as of the date such litigation is filed.
+
+10. COMMERCIAL AND ALTERNATIVE LICENSING
+
+If you want to use this software in a way this license does not permit — for
+example charging for a network service built on it, or integrating it into a
+closed-source product — you may request a separate written license from the
+author. Until such a license is granted in writing, every restriction in this
+file continues to apply in full. Requests: open an issue at the official
+repository.
 
 
 --------------------------------------------------------------------------------
@@ -161,13 +187,33 @@ this version and to later versions released under it.
 使用或其它处置而产生的任何索赔、损害或其它责任承担责任，无论其源于合同、
 侵权还是其它原因。
 
-7. 终止
+7. 终止与补救
 
 任何违反第 2 条或第 3 条的行为将自动终止您依本许可获得的权利。终止后，您
-必须停止分发，并停止将本软件作为服务运营。作者可基于具体情况以书面形式
-给予个别豁免。
+必须停止分发，并停止将本软件作为服务运营。
+
+除故意或重大过失外，若您在收到作者的书面违约通知后 30 日内完全改正，则依
+本许可授予您的权利自改正之日起恢复。作者亦可基于具体情况以书面形式给予
+个别豁免。
 
 8. 已发布的历史版本
 
 先前以其它许可发布的版本副本，继续适用其随附的许可。本许可适用于本版本及
 此后依本许可发布的版本。
+
+9. 专利授权
+
+各贡献者依其贡献，向您授予一项非排他、全球范围、免许可费的专利许可，允许
+您制造、使用、销售、许诺销售、进口及以其他方式运行、修改与分发其贡献的内容，
+该许可仅覆盖该贡献者有权许可、且被其贡献单独或与其本软件结合后必然侵犯的
+权利要求。
+
+若您对作者或任一贡献者提起专利诉讼（包括诉讼中的交叉请求或反诉），主张本
+软件侵犯某项专利，则依本许可授予您的、针对本软件的全部专利许可自该诉讼提起
+之日起终止。
+
+10. 商业与替代授权
+
+若您希望以本许可未允许的方式使用本软件——例如就其提供的网络服务收费，或将
+其集成进闭源产品——可向作者申请单独的书面授权。在取得书面授权之前，本文件
+中的全部限制继续完整适用。申请渠道：在官方仓库提交 issue。

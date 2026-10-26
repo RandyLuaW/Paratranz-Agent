@@ -232,4 +232,6 @@ This project uses a [custom source-available license](LICENSE). It is **not** an
 
 In short: free to use, modify and redistribute at no charge; redistribution must credit the original author (RandyLuaW) and include the official repository link <https://github.com/RandyLuaW/Paratranz-Agent>; providing this software (or a modified version) to third parties as a network service for a fee — in any form — is not permitted. All rights not expressly granted are reserved by the author.
 
-Third-party dependencies keep their own licenses; see [`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt). For other arrangements (closed-source integration, for example) please open an issue.
+Third-party dependencies keep their own licenses; see [`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt).
+
+A **commercial or alternative license** is available on request: if you need to use this software in a way the default license does not permit — charging for a network service built on it, or integrating it into a closed-source product — open an issue to discuss a separate written license. Until then every restriction applies in full. The license also carries a patent grant from contributors and a 30-day cure period after written notice of a breach.
