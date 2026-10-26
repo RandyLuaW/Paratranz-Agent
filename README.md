@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/RandyLuaW/Paratranz-Agent?color=76bad9)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-source--available-lightgrey.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
 
@@ -231,6 +231,15 @@ CI 在 ubuntu 与 windows 上分别执行 Python 3.11 / 3.13 两版。仓库另�
 
 ## 📄 License
 
-[GNU Affero General Public License v3.0](LICENSE)
+本项目采用[自定义源码许可](LICENSE)（源码公开，非 OSI 认证的开源许可），完整条款以 `LICENSE` 中的英文正文为准。
 
-简言之：可自由使用、修改与分发；若将本工具（或其修改版本）作为网络服务对外提供，必须公开源代码。如需更宽松的授权（例如闭源集成），欢迎提交 issue 讨论。
+可自由使用、修改与免费分发；分发须署名原作者并附官方仓库链接；作为网络服务提供时禁止任何形式收费。
+
+具体地：
+
+- **允许**：以任何目的使用；研究与修改源代码；发布新的分叉与衍生作品；以源码或二进制形式**免费**分发。
+- **分发时必须**：标注原作者（RandyLuaW）；包含官方仓库原始链接 <https://github.com/RandyLuaW/Paratranz-Agent>；说明这是修改版（若确有修改）；保留 `LICENSE`、版权声明与 `NOTICE.txt`。
+- **禁止**：就本软件或其修改版本收费（含销售、付费分发）；将其作为网络服务对外提供时收取任何形式的费用（订阅、一次性付费、积分制、「付费后访问」等）；以不同条款再许可。
+- **保留**：上述未明确授予的一切权利由作者保留。
+
+第三方依赖遵循各自许可，清单见 [`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt)。如需其它授权方式（例如商业闭源集成），欢迎提交 issue 讨论。

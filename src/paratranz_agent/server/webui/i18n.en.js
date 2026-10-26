@@ -366,7 +366,8 @@ Object.assign(window.I18N.en, {
   "更新日志": "Changelog",
   "各版本的改动说明": "What changed in each release",
   "源码仓库": "Source repository",
-  "AGPL-3.0 许可，欢迎提交 issue 与 PR": "AGPL-3.0 licensed. Issues and pull requests are welcome.",
+  "源码公开，可自由修改与免费分发，欢迎提交 issue 与 PR":
+    "Source-available: free to modify and redistribute. Issues and pull requests are welcome.",
 
   "还不能执行任务": "Cannot run tasks yet",
   "「模型」": "Models",

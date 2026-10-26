@@ -1507,7 +1507,7 @@ def main() -> int:
                                         "关于", "function aboutRow")))
         check("关于段含作者 / 更新日志 / 仓库链接",
               "github.com/RandyLuaW" in app_js and "/releases" in app_js
-              and "更新日志" in app_js and "AGPL" in app_js)
+              and "更新日志" in app_js and "源码公开" in app_js)
         en_text = i18n_en.text
         n_entries = en_text.count('": "')
         check("英文词条数量足够（>=150）", n_entries >= 150, f"{n_entries} 条")

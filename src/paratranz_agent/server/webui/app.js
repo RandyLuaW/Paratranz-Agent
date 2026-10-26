@@ -704,7 +704,7 @@ function renderPrefs(main) {
         ${aboutRow('版本', '当前运行的构建版本', 'v' + ver)}
         ${aboutRow('作者', '问题反馈与功能建议请走 issue', '', 'https://github.com/RandyLuaW', 'RandyLuaW')}
         ${aboutRow('更新日志', '各版本的改动说明', '', repo + '/releases', 'Releases')}
-        ${aboutRow('源码仓库', 'AGPL-3.0 许可，欢迎提交 issue 与 PR', '', repo, 'GitHub')}
+        ${aboutRow('源码仓库', '源码公开，可自由修改与免费分发，欢迎提交 issue 与 PR', '', repo, 'GitHub')}
         ${aboutRow('免费声明', '本软件完全免费；若通过付费渠道取得请立即退款并到官方仓库获取',
                    '', repo, '官方仓库')}
       </div>

@@ -71,7 +71,7 @@ Paratranz Agent · Windows 免安装版
 
 七、许可
 --------
-AGPL-3.0，见 LICENSE.txt。源码：https://github.com/RandyLuaW/Paratranz-Agent
+源码公开，可自由修改与免费分发；分发须署名作者并附上官方仓库链接，作为网络服务提供时禁止收费。完整条款见 LICENSE.txt。源码：https://github.com/RandyLuaW/Paratranz-Agent
 
 本工具会以你的身份调用 ParaTranz API，并可能在你机器上执行提取脚本、
 改写游戏文件——这些动作都需要你显式确认，后果由使用者自行承担。

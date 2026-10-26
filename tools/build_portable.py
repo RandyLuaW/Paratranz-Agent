@@ -151,6 +151,10 @@ def write_extras(stage: Path) -> None:
         shutil.copy2(lic, stage / "LICENSE.txt")
     # 免费声明必须跟着包走：这段文字就是给「从付费渠道拿到包的人」看的。
     # 换行统一 CRLF + BOM，Windows 记事本双击打开不会乱码。
+    tpl = ROOT / "THIRD-PARTY-LICENSES.txt"
+    if tpl.exists():
+        text = tpl.read_text(encoding="utf-8").replace("\r\n", "\n")
+        (stage / "第三方许可.txt").write_text(text.replace("\n", "\r\n"), encoding="utf-8-sig")
     notice = ROOT / "NOTICE.txt"
     if notice.exists():
         text = notice.read_text(encoding="utf-8").replace("\r\n", "\n")

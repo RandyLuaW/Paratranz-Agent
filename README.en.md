@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/RandyLuaW/Paratranz-Agent/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/RandyLuaW/Paratranz-Agent?color=76bad9)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-source--available-lightgrey.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/RandyLuaW/Paratranz-Agent/releases/latest)
 
@@ -218,6 +218,8 @@ Dangerous actions — running extractor scripts, rewriting game files in place, 
 
 ## 📄 License
 
-[GNU Affero General Public License v3.0](LICENSE)
+This project uses a [custom source-available license](LICENSE). It is **not** an OSI-approved open-source license; the English text in `LICENSE` is authoritative.
 
-In short: you may use, modify, and redistribute it freely; if you offer this tool (or a modified version of it) as a network service, you must publish the source code. If you need a more permissive arrangement — closed-source integration, for example — please open an issue to discuss it.
+In short: free to use, modify and redistribute at no charge; redistribution must credit the original author (RandyLuaW) and include the official repository link <https://github.com/RandyLuaW/Paratranz-Agent>; providing this software (or a modified version) to third parties as a network service for a fee — in any form — is not permitted. All rights not expressly granted are reserved by the author.
+
+Third-party dependencies keep their own licenses; see [`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt). For other arrangements (closed-source integration, for example) please open an issue.

@@ -33,5 +33,5 @@ The official repository never charges you, and there is no "activation",
 
 
 ------------------------------------------------------------------
-许可 / License: AGPL-3.0
+许可 / License: 见 LICENSE —— 源码公开，可自由修改与免费分发；分发须署名作者并附官方仓库链接；作为网络服务提供时禁止收费。
 仓库 / Repository: https://github.com/RandyLuaW/Paratranz-Agent
