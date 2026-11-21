@@ -64,6 +64,17 @@ Writeback enforces **three safety constraints** — better to skip a write than 
 2. **No in-place edit by default**: output goes to a separate directory. The default is a **full mirror**, in which unchanged files are copied verbatim and changed files are written as rewritten versions, so the target directory can replace the game directory directly; **changed files only** is also available.
 3. **In-place edit requires explicit authorization and backs up automatically**: it needs a five-second countdown confirmation plus a mandatory backend `accept_risk` check. Backups are written to the state directory (never inside the game directory, where the next extraction would rescan them as source files) and a manifest is generated.
 
+### String workbench
+
+Translation and review modify remote data in batches, so failures need to be visible and fixable by a human:
+
+- **Per-string progress**: every finished batch is pushed to the UI — the Jobs page shows which strings the model is handling right now, and in the Files page the matching rows update **in place** (translation, stage badge, status chip). A failed batch gives every string a terminal state instead of leaving rows "in flight". Dry-run only shows a "(dry run)" chip and never rewrites row content.
+- **Every string of a file**: click any file row to expand all of its strings (paged), edit translations in place, filter by stage, or filter within the page.
+- **Browse and filter**: page through strings by stage and file, with original, translation, stage and file. The platform offers no server-side full-text search, so filtering applies to the current page only (stated in the UI).
+- **Batch actions**: tick several strings to change stage, clear translations, or **re-translate only the selected ones** (one platform batch request; re-translation submits a job restricted to those ids).
+- **Manual edit written back**: edit a translation or a stage and save — it is written to the platform and the UI refreshes with the platform's read-back. If the platform does not confirm, the app reports an error rather than showing "saved".
+- **Two record sources**: local processing log (what the pipelines did to that string) and the platform's manual change log (the platform only records edits made in its web UI; API batch writes do not appear there).
+
 ### Models and cost
 
 - **Multi-provider management**: one source can host multiple models (useful for relays, aggregation gateways, and similar setups), each with independent parameters. Available models can be probed in one click, and connectivity and latency are checked per model.
