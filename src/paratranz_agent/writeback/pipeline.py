@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import time
 import uuid
@@ -81,6 +82,7 @@ class WritebackReport:
     entries: int = 0                 # 提取记录里的词条总数
     pulled: int = 0                  # 平台上达到门槛且有译文的条数
     skipped_stage: int = 0           # 平台上有但没到门槛
+    skipped_disputed: int = 0        # stage=2「有疑问」：校对打回的条目，绝不进成品
     skipped_empty: int = 0           # 到了门槛但译文为空
     skipped_no_original: int = 0     # 平台没记原文，无法校验位置（一律不写）
     skipped_untracked: int = 0       # 提取记录有、平台上没这个 key
@@ -95,6 +97,9 @@ class WritebackReport:
     backup_dir: str = ""
     details: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # 取译文时撞到上限（只扫了一部分）：这不是错误，但必须让人看见，
+    # 否则"成品少了"会被误认为"平台上就这些译文"。
+    pulled_truncated: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -108,7 +113,9 @@ class WritebackReport:
             "min_stage": self.min_stage,
             "entries": self.entries,
             "pulled": self.pulled,
+            "pulled_truncated": self.pulled_truncated,
             "skipped_stage": self.skipped_stage,
+            "skipped_disputed": self.skipped_disputed,
             "skipped_empty": self.skipped_empty,
             "skipped_no_original": self.skipped_no_original,
             "skipped_untracked": self.skipped_untracked,
@@ -154,12 +161,24 @@ def pull_translations(
     平台记录的原文」上；原文缺失就没法校验，写进去等于盲写位置。宁可少写。
     """
     out: dict[str, WriteItem] = {}
-    stats = {"scanned": 0, "skipped_stage": 0, "skipped_empty": 0, "skipped_no_original": 0}
+    stats = {
+        "scanned": 0, "skipped_stage": 0, "skipped_disputed": 0,
+        "skipped_empty": 0, "skipped_no_original": 0,
+        # 达到 max_items 就停：以前这里悄悄停下，报表看不出"只扫了一部分"，
+        # 于是「成品少了一半」被当成"平台上没有更多译文"。
+        "truncated": False, "max_items": int(max_items),
+    }
     files = [file_id] if file_id else None
     for s in client.iter_strings(file=files, max_items=max_items):
         stats["scanned"] += 1
         stage = int(s.stage)
         translation = (s.translation or "").strip()
+        # stage 2 = 有疑问（校对打回）。它本身就是「这条不可信」的标记，**绝不能**
+        # 进成品：`--min-stage 1` 以前把 2 也放过去了（2 >= 1），于是打回条目
+        # 会跟着写进游戏文件。
+        if stage == 2:
+            stats["skipped_disputed"] += 1
+            continue
         if stage < min_stage and stage != 9:
             stats["skipped_stage"] += 1
             continue
@@ -172,6 +191,8 @@ def pull_translations(
         out[s.key] = WriteItem(
             key=s.key, translation=translation, original=s.original or "", stage=stage
         )
+    if max_items and stats["scanned"] >= max_items:
+        stats["truncated"] = True
     return out, stats
 
 
@@ -230,11 +251,23 @@ def run_writeback(
     pulled, pstats = pull_translations(client, min_stage=min_stage, file_id=platform_file)
     rep.pulled = len(pulled)
     rep.skipped_stage = pstats["skipped_stage"]
+    rep.skipped_disputed = pstats.get("skipped_disputed", 0)
     rep.skipped_empty = pstats["skipped_empty"]
     rep.skipped_no_original = pstats.get("skipped_no_original", 0)
+    rep.pulled_truncated = bool(pstats.get("truncated"))
+    if rep.pulled_truncated:
+        rep.errors.append(
+            f"取译文时达到上限 {pstats.get('max_items')} 条，只扫描了平台的一部分词条；"
+            "成品可能缺少后面的译文，需要更大上限请分开多次回写（按文件）"
+        )
+        say(
+            f"⚠ 取译文达到上限 {pstats.get('max_items')} 条：只扫了一部分平台词条，"
+            "成品可能不完整"
+        )
     say(
         f"平台扫描 {pstats['scanned']} 条：可用译文 {len(pulled)}、"
-        f"未达门槛 {pstats['skipped_stage']}、译文为空 {pstats['skipped_empty']}、"
+        f"未达门槛 {pstats['skipped_stage']}、有疑问 {pstats.get('skipped_disputed', 0)}、"
+        f"译文为空 {pstats['skipped_empty']}、"
         f"平台缺原文 {rep.skipped_no_original}"
     )
 
@@ -331,11 +364,8 @@ def run_writeback(
             continue
 
         content = original_text
-        file_written = 0
         res = apply_items(content, items, opts=opts)
         content = res.content
-        file_written += len(res.written)
-        rep.written += len(res.written)
         for key, why in res.mismatched:
             rep.mismatched += 1
             rep.add_detail("mismatched", key, why)
@@ -349,11 +379,27 @@ def run_writeback(
             rep.unsupported += 1
             rep.add_detail("unsupported", key, "没有写回器认这个定位符")
 
-        if not file_written:
+        if not res.written:
             continue
-        rep.files += 1
         if dry_run:
+            # 预览：只报「会写多少」，不碰文件
+            rep.written += len(res.written)
+            rep.files += 1
             changed.add(rel)
+            continue
+
+        # **先编码，再碰文件**。`write_text` 是「打开即截断、边写边编码」：
+        # 译文里出现目标编码表示不了的字符（GBK 遇上 emoji/●）会抛
+        # UnicodeEncodeError（ValueError 子类，不是 OSError），此时源文件已经
+        # 被截成 0 字节 —— 一次编码异常就能毁掉游戏原文件。
+        try:
+            payload = content.encode(file_encoding, "surrogateescape")
+        except UnicodeError as exc:
+            rep.failed_files += 1
+            msg = f"{rel} 的译文无法用 {file_encoding} 编码（{exc}），该文件未写入"
+            rep.add_error(msg)
+            for key in res.written:
+                rep.add_detail("error", key, msg)
             continue
 
         if in_place:
@@ -361,18 +407,40 @@ def run_writeback(
                 original_text.encode(file_encoding, "surrogateescape")
             ).hexdigest()
             assert backup_dir is not None
-            bak = _write_backup(backup_dir, rel, original_text, file_encoding)
+            try:
+                bak = _write_backup(backup_dir, rel, original_text, file_encoding)
+            except OSError as exc:
+                # 第 3 条安全线：备份不成立就不许原地写
+                rep.failed_files += 1
+                msg = f"{rel} 备份失败，已跳过原地写入：{exc}"
+                rep.add_error(msg)
+                for key in res.written:
+                    rep.add_detail("error", key, msg)
+                continue
             manifest[rel] = {"backup": str(bak), "sha256": digest}
         dst = src if in_place else target_root / rel
+        tmp = dst.with_name(dst.name + ".ptz-tmp")
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text(content, encoding=file_encoding, errors="surrogateescape")
+            # 临时文件 + 原子替换：写到一半被杀（web.bat 崩了自动重启很常见）
+            # 也不会留下半截文件
+            tmp.write_bytes(payload)
+            os.replace(tmp, dst)
         except OSError as exc:
             # 单个文件写不进去（只读、被占用、路径过长）不能中断整轮：
             # 否则后面所有文件都不写，而 manifest 与报告会一起丢
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
             rep.failed_files += 1
             rep.add_error(f"写不进 {rel}：{exc}")
             continue
+        # 计数与 changed 只在**写成功之后**加：以前加在写之前，写失败时报告
+        # 仍然宣称「写入 N 条 / M 个文件」，而镜像模式还会把源文件原样复制过去，
+        # 于是输出目录里是未汉化文件 + 全绿报告。
+        rep.written += len(res.written)
+        rep.files += 1
         changed.add(rel)
 
     if manifest:
