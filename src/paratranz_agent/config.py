@@ -6,13 +6,24 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
-class ProjectCfg(BaseModel):
+class _Strict(BaseModel):
+    """所有配置节都**拒绝未知键**。
+
+    pydantic 默认 `extra="ignore"`，拼错的键被静默丢掉：`Project:`（大写）、
+    `block_on` 写成 `block-on`、`force_overwrit`，全都不报错，实际跑在默认值上
+    —— 用户以为配置生效了。这条与「认不出就当空」是同一类缺陷，只是发生在配置层。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ProjectCfg(_Strict):
     id: int = 0
     name: str = ""
     source_lang: str = "en"
@@ -21,14 +32,14 @@ class ProjectCfg(BaseModel):
     style: str = "简体中文，口语自然，保留角色语气；专有名词遵循术语表"
 
 
-class ApiCfg(BaseModel):
+class ApiCfg(_Strict):
     base_url: str = "https://paratranz.cn/api"
     token: str = ""
     rate_limit_per_min: int = 420
     timeout: float = 60.0
 
 
-class LLMCfg(BaseModel):
+class LLMCfg(_Strict):
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
     api_key: str = ""
@@ -37,6 +48,10 @@ class LLMCfg(BaseModel):
     concurrency: int = 4
     timeout: float = 120.0
     max_retries: int = 3
+    # 输出 token 上限：0 = 不限制（由服务端默认）。
+    # 这个字段以前**只存在于 WebUI 设置里**，`to_agent_config` 把它传给 LLMCfg
+    # 时被 pydantic 静默丢掉 —— 界面上填了、保存成功、完全没效果。
+    max_tokens: int = 0
     # 单次请求最多带多少条词条
     batch_size: int = 40
     # 模型级附加请求体参数（top_p / reasoning_effort 等），合并进请求体
@@ -44,9 +59,16 @@ class LLMCfg(BaseModel):
     # 源级自定义请求头（中转站/网关常要 `HTTP-Referer`、`X-Title`、自定义鉴权头）。
     # 与 extra_params 分工：这个是 HTTP 头，那个是请求体字段。
     headers: dict[str, str] = Field(default_factory=dict)
+    # 出网代理（http://127.0.0.1:7890 这种）。留空 = 直连。
+    proxy: str = ""
+    # JSON 传输方式：auto = 先用 json_object，网关拒绝就退到 json_schema，
+    # 再退到不传（见 llm.OpenAICompatLLM）。object/schema/off 则是强制固定。
+    # 做成配置项是因为"这个网关支持哪种"是外部事实，不能靠猜，
+    # 也不能让它在代码里写死之后又随网关变化而静默失效。
+    json_mode: Literal["auto", "object", "schema", "off"] = "auto"
 
 
-class TranslateCfg(BaseModel):
+class TranslateCfg(_Strict):
     batch_size: int = 40
     # 每批塞多少条 TM 参考
     tm_top_k: int = 5
@@ -64,7 +86,7 @@ class TranslateCfg(BaseModel):
     min_length: int = 1
 
 
-class ReviewCfg(BaseModel):
+class ReviewCfg(_Strict):
     # 确定性 QA 严重度达到该级别即打回（error / warn / info）
     block_on: str = "error"
     # 是否用 LLM 做二审
@@ -86,7 +108,7 @@ class ReviewCfg(BaseModel):
     batch_size: int = 20
 
 
-class TaskCfg(BaseModel):
+class TaskCfg(_Strict):
     # 每个任务覆盖的词条上限，超出则拆成多个任务
     max_strings_per_task: int = 800
     # 每个任务覆盖的文件数上限
@@ -101,7 +123,7 @@ class TaskCfg(BaseModel):
     title_prefix: str = "[自动分派]"
 
 
-class GlossaryCfg(BaseModel):
+class GlossaryCfg(_Strict):
     # 候选术语的最低出现次数（真实出现次数，不是加权分）
     min_occurrences: int = 3
     # 已审核/已检查的定稿译文不足时，是否补 stage=1（未校对机翻）作为取材。
@@ -113,7 +135,7 @@ class GlossaryCfg(BaseModel):
     llm_propose: bool = True
 
 
-class StyleGuideCfg(BaseModel):
+class StyleGuideCfg(_Strict):
     # 发布为公告时是否仅成员可见
     internal: bool = True
     # 公告分类
@@ -122,7 +144,7 @@ class StyleGuideCfg(BaseModel):
     bumped: bool = True
 
 
-class AgentConfig(BaseModel):
+class AgentConfig(_Strict):
     """流水线看到的配置形态（领域形状）：按环节分节，只放该环节用得到的项。
 
     两个来源都收敛到它：CLI 从 `config/agent.yaml` + 环境变量读，
@@ -164,8 +186,12 @@ class AgentConfig(BaseModel):
                 continue
             try:
                 cast_val = cast(val)
-            except (TypeError, ValueError):
-                continue
+            except (TypeError, ValueError) as exc:
+                # 静默 continue 会让「限速改了 / 项目切了」变成假象：实际还跑在
+                # 默认或 yaml 值上，直到跑一轮才发现打的是别的项目。
+                raise ValueError(
+                    f"环境变量 {env}={val!r} 不是合法的 {cast.__name__}，请改正或删掉它"
+                ) from exc
             if key is None:
                 setattr(self, sec, cast_val)
             else:
