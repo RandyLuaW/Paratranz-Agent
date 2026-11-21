@@ -33,7 +33,7 @@ translate:
   enforce_terms: true
   use_platform_suggestions: false   # 平台 suggestions 接口必须串行，慢；默认关
   force_overwrite: false     # true 会覆盖人工译文，慎用
-  files: []                  # 只处理路径含这些子串的文件，例：["Map", "quest"]
+  files: []                  # 白名单：文件名**精确相等**，或以该项为前缀目录（例：["www/data/Actors.json"], ["www/data/"]）；空=全部
   min_length: 1
 
 review:

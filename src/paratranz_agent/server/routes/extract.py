@@ -179,8 +179,10 @@ def register(app: FastAPI, d: Deps) -> None:
         return {
             "meta": meta,
             "entries": entries,
-            # 总条数取自 meta（提取完成时就写好了），不必为此再读一遍文件
-            "total": int(meta.get("entries") or 0) or len(entries),
+            # 总条数取自 meta（提取完成时就写好了）。取不到就返回 None ——
+            # 以前退化成 `len(entries)`（当前页长度），页脚于是写「共 100 条」，
+            # 而实际还有几千条没显示。0 和「不知道」必须能区分。
+            "total": int(meta["entries"]) if meta.get("entries") is not None else None,
             # 日志来自提取器子进程的 stdout，是本工具唯一「不经过 LogStore」的
             # 文本通道。子进程环境变量里已经剔掉凭据（见 extraction/runner.py），
             # 这里再过一遍脱敏，挡的是「提取器自己读文件读到了密钥」那种情况。
@@ -203,7 +205,7 @@ def register(app: FastAPI, d: Deps) -> None:
         return report
 
     @app.post("/api/extractions/{jid}/export")
-    def export_extraction(jid: str, body: dict) -> dict:
+    def export_extraction(jid: str) -> dict:
         """导出 ParaTranz items（可直接给 update_file_translation）。"""
         from ..extraction import (
             ExtractionError,

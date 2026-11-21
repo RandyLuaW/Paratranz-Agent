@@ -26,7 +26,7 @@ from . import routes
 from .deps import Deps
 from .jobs import EventBus, JobRunner
 from .settings import SettingsStore
-from .tools import AppContext, build_registry
+from .tools import AppContext, NotConfigured, build_registry
 
 WEBUI_DIR = Path(__file__).parent / "webui"
 
@@ -155,6 +155,19 @@ def create_app(
 
         secrets = [store.load().token, store.load().llm_key]
         return JSONResponse({"error": redact(str(exc.detail), secrets)}, status_code=exc.status_code)
+
+    @app.exception_handler(NotConfigured)
+    async def not_configured(_: Request, exc: NotConfigured):
+        """「还没填 Token / 项目编号」是客户端可修复的状态，不是服务端故障。
+
+        以前这类 RuntimeError 落到兜底处理器 → 500 + `RuntimeError: 尚未配置…`，
+        前端把 500 当「服务端坏了」，排查方向直接跑偏（同一个原因在
+        `/api/project` 是 400，在别处是 500）。
+        """
+        from .redact import redact
+
+        secrets = [store.load().token, store.load().llm_key]
+        return JSONResponse({"error": redact(str(exc), secrets)}, status_code=400)
 
     @app.exception_handler(Exception)
     async def unhandled(_: Request, exc: Exception):  # pragma: no cover

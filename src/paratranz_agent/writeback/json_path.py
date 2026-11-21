@@ -95,8 +95,21 @@ class _Scanner:
                     hexs = s[self.i + 1 : self.i + 5]
                     if len(hexs) < 4 or not re.fullmatch(r"[0-9a-fA-F]{4}", hexs):
                         raise self._err("\\u 转义非法")
-                    out.append(chr(int(hexs, 16)))
+                    code = int(hexs, 16)
                     self.i += 5
+                    # **代理对必须合并**：星平面字符（emoji 等）在 JSON 里常写成
+                    # `"\ud83d\ude00"` 两个转义，而提取器用的 `json.loads` 会把它们
+                    # 合成一个字符 😀。这里不合并，同一段原文在扫描侧就比平台记录
+                    # 多一个码位 → 回写永远判「原文不一致」，所有 emoji 词条一条都
+                    # 写不进去，而报错文案把同一句话显示两遍，用户无从判断。
+                    if 0xD800 <= code <= 0xDBFF and s.startswith("\\u", self.i):
+                        lo_hex = s[self.i + 2 : self.i + 6]
+                        if re.fullmatch(r"[0-9a-fA-F]{4}", lo_hex or ""):
+                            lo = int(lo_hex, 16)
+                            if 0xDC00 <= lo <= 0xDFFF:
+                                code = 0x10000 + (((code - 0xD800) << 10) | (lo - 0xDC00))
+                                self.i += 6
+                    out.append(chr(code))
                     continue
                 out.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
                             '"': '"', "\\": "\\", "/": "/"}.get(e, e))

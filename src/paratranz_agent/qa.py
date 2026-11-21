@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import lru_cache
@@ -50,7 +51,13 @@ class QAReport:
         self.max_severity = max(self.max_severity, issue.severity)
 
     def finalize(self, block_on: Severity) -> "QAReport":
-        self.ok = self.max_severity < block_on
+        # `block_on=INFO` 的语义是「有任何问题就不通过」，而不是「连零问题也不通过」：
+        # `max_severity` 在无 issue 时就是 INFO(0)，直接比大小会让**每一条**译文
+        # 都被打回（review.block_on=info 时全项目 100% 不通过）。
+        if not self.issues:
+            self.ok = True
+        else:
+            self.ok = self.max_severity < block_on
         return self
 
 
@@ -170,17 +177,28 @@ def check_whitespace(src: str, dst: str) -> list[Issue]:
 
 
 def check_numbers(src: str, dst: str) -> list[Issue]:
+    """数字必须**按重数**一致。
+
+    原来用「成员判断」求缺失项：原文 `HP 10 / 10` 里有两个 `10`，译文只留一个，
+    `[x for x in a if x not in b]` 得到空列表 → 一条问题都不报。多重集差才能
+    同时抓到「少了重复的那个」和「多出来的数字」。
+    """
     issues: list[Issue] = []
     a = re.findall(r"\d+(?:\.\d+)?", src)
     b = re.findall(r"\d+(?:\.\d+)?", dst)
     if a and not b:
         issues.append(Issue("number_lost", Severity.ERROR,
                             f"原文数字 {a} 在译文中全部消失", "数值必须保留"))
-    elif a and sorted(a) != sorted(b):
-        missing = [x for x in a if x not in b]
+        return issues
+    if a and sorted(a) != sorted(b):
+        missing = sorted((Counter(a) - Counter(b)).elements())
+        extra = sorted((Counter(b) - Counter(a)).elements())
         if missing:
             issues.append(Issue("number_mismatch", Severity.WARN,
                                 f"数字不一致，原文有而译文缺: {missing}", "确认是否需要换算"))
+        if extra:
+            issues.append(Issue("number_extra", Severity.WARN,
+                                f"译文多出原文没有的数字: {extra}", "确认是否是笔误"))
     return issues
 
 
@@ -315,7 +333,10 @@ def check_control_balance(src: str, dst: str) -> list[Issue]:
     issues: list[Issue] = []
     if dst.count("{") - dst.count("}") != src.count("{") - src.count("}"):
         issues.append(Issue("brace_unbalanced", Severity.ERROR, "花括号不配对", "检查占位符是否截断"))
-    if dst.count("%") != len(re.findall(r"%[\d$]*[sdfioxX%]", dst)):
+    # 合法的百分数（`命中率 50%`）先摘掉再数：否则每条带百分比的中文 UI 文本
+    # 都会被记一条「存在孤立的 % 号」（WARN），打回列表里全是误报。
+    pct = re.sub(r"\d\s*%", "", dst)
+    if pct.count("%") != len(re.findall(r"%[\d$]*[sdfioxX%]", pct)):
         issues.append(Issue("percent_stray", Severity.WARN, "存在孤立的 % 号", "若需表达百分号请用％"))
     return issues
 

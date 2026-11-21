@@ -38,6 +38,35 @@ def as_float(value: Any, *, name: str, default: float = 0.0) -> float:
         raise HTTPException(400, f"{name} 必须是数字，收到的是 {value!r}") from exc
 
 
+# 布尔入参的**唯一**解析口径。
+# 为什么不能直接用 `bool(v)`：字符串 `"false"` 是 truthy，于是
+#   `{"accept_risk": "false"}` 会通过危险动作闸门，
+#   `{"dry_run": "false"}` 会走演练分支却返回 `dry_run=false`（调用方以为真跑了）。
+# 这类入参从 `POST /api/jobs` 的裸 args、`/api/agent` 的模型输出都会进来，
+# 所以必须显式收窄，而不是相信调用方给的是真 bool。
+_TRUE_WORDS = frozenset({"1", "true", "yes", "y", "on", "t"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "n", "off", "f", ""})
+
+
+def as_bool(value: Any, *, name: str, default: bool = False) -> bool:
+    """转 bool。`None` 取默认值；认不出的字面量一律 400。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in _TRUE_WORDS:
+            return True
+        if v in _FALSE_WORDS:
+            return False
+    raise HTTPException(
+        400, f"{name} 必须是布尔值（true/false），收到的是 {value!r}"
+    )
+
+
 # 一次列 500 条已远超界面显示能力，再大只会把响应体撑大；
 # 上限写在这里，免得每个端点各写一个数字。
 MAX_PAGE = 500

@@ -136,6 +136,23 @@ def main() -> int:
                                             min_len=min_len, max_len=max_len,
                                             tag=f"tp{pi}")
 
+        # 2b) **数组型**的事件文件：CommonEvents.json / Troops.json 的顶层是
+        # `[{id, name, list|pages}, ...]`，不是带 `list` 的单条对象。
+        # 以前只在 dict 分支里找 `list`/`pages`，于是这两个文件一条都提不出来
+        # （而文档写着「CommonEvents.json 同上」）—— 典型的「看着跑成功了，其实 0 条」。
+        if want_dialog and isinstance(data, list):
+            for ei, row in enumerate(data):
+                if not isinstance(row, dict):
+                    continue
+                if isinstance(row.get("list"), list):
+                    collect_from_events(row["list"], rel, entries,
+                                        min_len=min_len, max_len=max_len, tag=f"ce{ei}")
+                for pi, page in enumerate(row.get("pages") or []):
+                    if isinstance(page, dict):
+                        collect_from_events(page.get("list"), rel, entries,
+                                            min_len=min_len, max_len=max_len,
+                                            tag=f"tp{ei}p{pi}")
+
         # 3) System.json：标题与术语
         if name == "System.json" and isinstance(data, dict) and want_fields:
             title = data.get("gameTitle")

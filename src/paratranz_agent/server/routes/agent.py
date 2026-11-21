@@ -32,18 +32,21 @@ def register(app: FastAPI, d: Deps) -> None:
         job_ids: list[str] = []
         skipped: list[dict] = []
         if body.execute and plan["steps"]:
-            from ..tools import DANGEROUS_TOOLS
+            from ..tools import agent_needs_confirm
 
             for step in plan["steps"]:
                 tool = step["tool"]
-                if tool in DANGEROUS_TOOLS:
-                    # 危险动作**绝不**由自然语言输入直接触发：模型只是把文本映射成
-                    # 工具序列，而文本可能来自游戏文件内容（提示注入）。审计实测过
-                    # 「忽略之前规则」这类输入能让它真的执行本机代码。
-                    # 这里只给出建议，让用户自己到对应页面勾确认后再点。
+                if agent_needs_confirm(tool):
+                    # **写本机文件 / 执行代码 / 不可撤回地批量建词条**这几类，绝不
+                    # 由自然语言输入直接触发：模型会把文本映射成「工具名 + 任意 args」，
+                    # 而 `writeback` 的 `in_place`+`accept_risk` 就是同一次请求里的
+                    # 普通字段（模型照着输出一份就能越过弹窗与 5 秒确认）。
+                    # 判定来源是 TOOL_SPECS 的 `agent` 标记（缺标记=拦），
+                    # 不是这里再手写一份黑名单。
                     skipped.append(
                         {"tool": tool, "args": step.get("args") or {},
-                         "why": "危险动作需在页面上手动确认风险后再执行"}
+                         "why": "该动作会写本机文件、执行代码或不可撤回地批量写入平台，"
+                                "需在对应页面手动确认后再执行"}
                     )
                     continue
                 try:

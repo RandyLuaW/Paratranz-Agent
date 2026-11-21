@@ -191,12 +191,10 @@ class RuntimeSettings(BaseModel):
     llm_timeout: float = 120.0
     llm_max_retries: int = 3
     llm_fallback_models: str = ""
-    llm_context_max_turns: int = -1
-    llm_keep_recent_ratio: float = 0.15
-
-    # ---- Agent 行为 ----
-    agent_max_steps: int = 8
-    agent_tool_timeout: int = 120
+    # 这里曾经还有 llm_context_max_turns / llm_keep_recent_ratio / agent_max_steps /
+    # agent_tool_timeout：四个「界面能存、代码从不读」的死配置（只被 GET /api/models
+    # 回显）。死配置比没配置更坑 —— 用户以为调了参。要恢复上下文裁剪/步数上限，
+    # 先把消费点写出来再往这里加字段。
     # 注意：没有 system_prompt_prefix。曾经有过一个同名字段，但它既不进
     # `prompt_for()` 也不进 `to_agent_config()`，界面填了完全没效果 ——
     # 全局前置提示词的唯一入口是 `prompts.prefix`。死配置比没配置更坑，
@@ -503,9 +501,24 @@ class SettingsStore:
                     continue
                 if k == "api_key" and isinstance(v, str) and (not v or "*" in v):
                     continue
+                if k == "headers":
+                    # 掩码值不能回流：`masked()` 返回 `********abcd`，脚本
+                    # 「读 provider → 改一项 → 整条 PUT 回来」会把真 Key 写成掩码串
+                    if not isinstance(v, dict):
+                        raise ValueError("headers 必须是对象")
+                    cur_h = dict((existing.headers if existing else {}))
+                    for hk, hv in v.items():
+                        if isinstance(hv, str) and "*" in hv:
+                            continue
+                        cur_h[str(hk)] = str(hv)
+                    data["headers"] = cur_h
+                    continue
                 if k == "models":
                     continue  # 模型走独立接口
-                if k in ProviderCfg.model_fields and v is not None:
+                # 注意：**不判 `v is None`**。`null` 是「清空该字段」的合法输入
+                # （前端清空 temperature 时发的就是 null），丢掉它会让
+                # 「留空 = 继承源默认值」保存后不生效、旧值原样回来。
+                if k in ProviderCfg.model_fields:
                     data[k] = v
             ProviderCfg.model_validate(data)
             if existing:
@@ -553,7 +566,9 @@ class SettingsStore:
             existing = p.model_by_id(mid)
             data = existing.model_dump() if existing else {"id": mid}
             for k, v in payload.items():
-                if k in ModelCfg.model_fields and v is not None:
+                # `null` = 清空（清空 temperature/max_tokens 就是「继承源默认」，
+                # 前端发的正是 null）。以前整条跳过，于是弹窗关掉再打开旧值又回来。
+                if k in ModelCfg.model_fields:
                     data[k] = v
             ModelCfg.model_validate(data)
             new_models = [
@@ -636,8 +651,11 @@ class SettingsStore:
                     pass
             os.replace(tmp, self.path)
             self._tighten()
-            self._cache = s
-            return s
+            # **必须换一个新实例**：`cfg_for()` 用「设置对象身份」做缓存键，
+            # upsert_provider / upsert_model / save_routing 都是原地改 `s` 再落盘，
+            # 把同一个对象塞回缓存 = 身份没变 = 缓存命中 = 改了并发数仍跑旧配置。
+            self._cache = RuntimeSettings.model_validate(s.model_dump())
+            return self._cache
 
     def _tighten(self) -> None:
         """把凭据文件权限收到只有当前用户可读写。"""

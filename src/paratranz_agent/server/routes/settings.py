@@ -15,6 +15,7 @@ from ...pipelines.translate import SYSTEM_PROMPT as TRANSLATE_SYSTEM
 from ..agent import AGENT_SYSTEM
 from ..deps import Deps
 from ..extractor_agent import SYSTEM_PROMPT as EXTRACTOR_SYSTEM
+from ..params import as_int
 from ..settings import PROMPT_TASKS, RuntimeSettings, TASK_LABELS, TASK_LABELS_EN
 
 # 这几个字段各有专用端点（providers/routing/prompts/budget/pricing），
@@ -35,8 +36,6 @@ _PATCH_CONSTRAINTS: dict[str, tuple] = {
     "per_run_limit": (int | None, Field(default=None, ge=1)),
     "llm_concurrency": (int | None, Field(default=None, ge=1, le=64)),
     "llm_max_retries": (int | None, Field(default=None, ge=0, le=10)),
-    "agent_max_steps": (int | None, Field(default=None, ge=1, le=50)),
-    "agent_tool_timeout": (int | None, Field(default=None, ge=5, le=3600)),
     "llm_max_tokens": (int | None, Field(default=None, ge=0)),
     "llm_timeout": (float | None, Field(default=None, gt=0)),
     "llm_temperature": (float | None, Field(default=None, ge=0, le=2)),
@@ -93,35 +92,73 @@ def register(app: FastAPI, d: Deps) -> None:
         return {"ok": True, "settings": saved.masked()}
 
     @app.post("/api/settings/test")
-    def test_settings() -> dict:
+    def test_settings(body: dict | None = None) -> dict:
+        """测试连接：**用界面上正在填的值**测，不回读已保存的那份。
+
+        以前这个端点不接收参数，只测 `settings.json` 里的配置：改了项目编号/
+        Token 却不点「保存」就直接测，测的还是上一次的值 —— 用户看到「编号明明
+        是对的却报 404」，无从对账。这一点加上「错误里没有真实 URL 和项目编号」
+        就是第一个用户反馈的那个 404 的全部成因。
+
+        失败时返回 `ok=false` + `hints`（结构化排查结论），不再只丢一坨 500/400：
+        平台对「项目不存在 / 私有项目未加入 / Token 无效」**回的是同一个 404**，
+        不给上下文等于什么都没说。检测失败不是服务端故障，所以状态码仍是 200。
+        """
         s = store.load()
-        if not s.token:
+        body = body or {}
+        project_id = as_int(body.get("project_id"), name="project_id", default=s.project_id)
+        base_url = (str(body.get("base_url") or "").strip() or s.base_url or "").rstrip("/")
+        # Token 只在界面上新填了才用新的；留空表示「沿用已保存的」
+        token = str(body.get("token") or "").strip() or s.token
+        if not token:
             raise HTTPException(400, "未配置 Token")
-        if not s.project_id:
+        if not project_id:
             raise HTTPException(400, "未配置项目编号")
+
+        same = (
+            project_id == s.project_id
+            and base_url == (s.base_url or "").rstrip("/")
+            and token == s.token
+        )
+        client = ctx.client if same else ctx.client_for(
+            token=token,
+            project_id=project_id,
+            base_url=base_url,
+            rate_limit_per_min=s.rate_limit_per_min,
+        )
         try:
-            info = ctx.client.get_project()
+            info = client.get_project()
             members = 0
             try:
-                members = len(ctx.client.list_members())
+                members = len(client.list_members())
             except ParaTranzError:
                 pass
-            return {
-                "ok": True,
-                "project": {
-                    "id": info.id,
-                    "name": info.name,
-                    "source": info.source,
-                    "dest": info.dest,
-                    "members": members,
-                    "task_enabled": bool(info.extra.get("task")),
-                    "api_edit_disabled": bool(info.extra.get("disableApiEdit")),
-                    "review_mode": info.review_mode,
-                },
-                "warnings": _warnings(info),
-            }
         except ParaTranzError as exc:
-            raise HTTPException(exc.status or 500, str(exc)) from exc
+            hints = client.diagnose_project_access() if exc.status == 404 else []
+            return {
+                "ok": False,
+                "error": str(exc),
+                "url": exc.url or "",
+                "project_id": project_id,
+                "hints": hints,
+            }
+        finally:
+            if not same:
+                client.close()
+        return {
+            "ok": True,
+            "project": {
+                "id": info.id,
+                "name": info.name,
+                "source": info.source,
+                "dest": info.dest,
+                "members": members,
+                "task_enabled": bool(info.extra.get("task")),
+                "api_edit_disabled": bool(info.extra.get("disableApiEdit")),
+                "review_mode": info.review_mode,
+            },
+            "warnings": _warnings(info),
+        }
 
     @app.get("/api/prompts")
     def get_prompts() -> dict:

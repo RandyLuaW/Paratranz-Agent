@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
@@ -48,10 +50,16 @@ def register(app: FastAPI, d: Deps) -> None:
         for model, price in (body or {}).items():
             if not isinstance(price, dict):
                 continue
+            # **合并而不是整体替换**：前端只发用户填了的那几档，整体替换会把
+            # 没填的档清零 → 该模型的 input 变 0 → 之后所有调用成本记 0，
+            # 预算护栏（按 cost_usd 比）永远不触发。
             current[model] = {
-                k: as_float(v, name=f"{model}.{k}")
-                for k, v in price.items()
-                if k in ("input", "input_cached", "output", "cache_creation")
+                **dict(current.get(model) or {}),
+                **{
+                    k: as_float(v, name=f"{model}.{k}")
+                    for k, v in price.items()
+                    if k in ("input", "input_cached", "output", "cache_creation")
+                },
             }
         store.save({"pricing_overrides": current})
         ctx.usage.pricing = {**ctx.usage.pricing, **current}
@@ -71,14 +79,15 @@ def register(app: FastAPI, d: Deps) -> None:
         return {"files": ctx.logs.files()}
 
     @app.get("/api/logs/download")
-    def log_download(name: str, tail: int = 2000) -> PlainTextResponse:
+    def log_download(name: str, tail: int = Query(2000, ge=1, le=200_000)) -> PlainTextResponse:
         try:
             text = ctx.logs.read_file(name, tail=tail)
         except (ValueError, FileNotFoundError) as exc:
             raise HTTPException(404, str(exc)) from exc
         return PlainTextResponse(
             text,
-            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+            # 只回文件名本身：畸形 name（含引号/控制字符）会破坏响应头
+            headers={"Content-Disposition": f'attachment; filename="{Path(name).name}"'},
         )
 
     @app.delete("/api/logs/buffer")
