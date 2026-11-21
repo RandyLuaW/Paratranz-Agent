@@ -27,6 +27,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from ..config import AgentConfig
+from ..errors import BudgetExceeded
 from ..llm import BaseLLM, LLMError, LLMNotConfigured, build_messages, extract_json
 from ..models import Stage, StringItem
 from ..qa import Issue, QAReport, Severity, run_qa
@@ -71,6 +72,12 @@ def _norm_verdict(raw: Any) -> str:
     v = str(raw if raw is not None else "").strip().lower()
     if not v:
         return ""
+    # 中文短句要先判"失败式否定"，再判"通过式否定"：
+    # `不通过` 含"通过"、`没有错误` 含"错误"，顺序反了就会把两者都判错（实测各一次）。
+    if any(t in v for t in ("不通过", "未通过", "不合格", "不达标", "有问题", "有错", "存在错")):
+        return "fail"
+    if any(t in v for t in ("无错", "没有错", "未发现", "没问题", "无问题", "通过")):
+        return "pass"
     if v in _PASS_WORDS:
         return "pass"
     if v in _FAIL_WORDS:
@@ -105,7 +112,37 @@ REVIEW_SYSTEM = """你是一名严格的游戏本地化校对员。给定原文�
 
 判定为 pass 的情形：语义准确、术语正确、中文自然、格式一致。轻微风格偏好不算 fail。
 
-输出严格 JSON：{"items":[{"id":<原样回传>,"verdict":"pass"或"fail","reason":"<不超过40字>"}]}"""
+输出严格 JSON：{"items":[{"id":<原样回传>,"verdict":"pass"或"fail","reason":"<不超过40字>"}]}
+字段名必须是 id / verdict / reason 三个，**不要用 review、result、ok 之类的别名**，
+也不要回传原文与译文（占 token 且容易写坏 JSON 的引号）。"""
+
+
+# 支持结构化输出的网关用严格 schema：字段名与三件套由 schema 强制，
+# 模型就不能自作主张用 `review` 当字段名、也不容易产出坏引号。
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "verdict": {"type": "string", "enum": ["pass", "fail"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["id", "verdict", "reason"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
+# 模型偶尔会用这些键名代替 `verdict`（实测出现过 `review`）。
+# 认下别名的同时把这件事记进日志，提示词漂移才看得见。
+_VERDICT_KEYS = ("verdict", "review", "result", "judgement", "judgment", "结论", "判定")
 
 
 @dataclass
@@ -120,9 +157,13 @@ class ReviewStats:
     passed: int = 0
     disputed: int = 0
     written: int = 0
+    # 演练模式下"会改多少条"：written 恒为 0，两个字段别混用
+    would_write: int = 0
     # 模型没回 verdict / 整批失败：保持原状，不算通过
     skipped_no_verdict: int = 0
     failed_batches: int = 0
+    # 撞到单任务预算而停下：与"模型失败"分开记，别让人以为是网关坏了
+    budget_stopped: bool = False
     # stage=1 但译文为空的脏数据条数（打回或重置，见 run()）
     empty_translation: int = 0
     # 打回明细帖：action = create / reply / ""（没发）；id = 平台讨论 id；
@@ -132,6 +173,12 @@ class ReviewStats:
     issue_error: str = ""
     dry_run: bool = False
     samples: list[dict] = field(default_factory=list)
+    # 模型二审的**具体失败原因**（去重、最多 5 条）。
+    # 以前整批失败被 `except LLMError: return {}` 吞掉：failed_batches 恒为 0，
+    # 界面只看到「通过 0，打回 0」＋「完成」。
+    errors: list[str] = field(default_factory=list)
+    # 需要人看一眼的异常（写 stage 不完整、发帖失败之类），与 translate 同口径
+    warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -143,14 +190,40 @@ class ReviewStats:
             "passed": self.passed,
             "disputed": self.disputed,
             "written": self.written,
+            "would_write": self.would_write,
             "skipped_no_verdict": self.skipped_no_verdict,
             "failed_batches": self.failed_batches,
+            "budget_stopped": self.budget_stopped,
             "empty_translation": self.empty_translation,
             "issue_action": self.issue_action,
             "issue_id": self.issue_id,
             "issue_error": self.issue_error,
             "dry_run": self.dry_run,
+            "errors": list(self.errors),
+            "warnings": list(self.warnings),
         }
+
+
+class StageWriteInterrupted(RuntimeError):
+    """写 stage 中途失败。
+
+    已改完的块**已经落到平台并记进账本**，所以异常里带上「已写入 N 条」，
+    并把部分成功的 `stats` 挂上去 —— 调用方既能报错又能拿到报表。
+    """
+
+    def __init__(self, message: str, stats: "ReviewStats"):
+        super().__init__(message)
+        self.stats = stats
+
+
+# 逐条事件的单片大小：一次推几千条会让 SSE 事件体积失控，
+# 而界面一次也只显示一屏（分片后前端能边收边刷）。
+ITEM_EVENT_CHUNK = 50
+
+
+def _chunks(rows: list[dict], size: int = ITEM_EVENT_CHUNK):
+    for i in range(0, len(rows), size):
+        yield rows[i : i + size]
 
 
 class ReviewPipeline:
@@ -164,11 +237,14 @@ class ReviewPipeline:
         llm: BaseLLM,
         system_prompt: str | None = None,
         log: "Callable[[str], None] | None" = None,
+        budget_check: "Callable[[], None] | None" = None,
     ):
         self.client = client
         self.cfg = cfg
         self.store = store
         self.llm = llm
+        # 任务内预算检查点：由 server 层注入（CLI 不注入 = 不检查，行为不变）
+        self.budget_check = budget_check
         # 自定义提示词；空串表示用模块内置默认值
         self.system_prompt = (system_prompt or "").strip() or REVIEW_SYSTEM
         # 进度回调：全量校对要跑几十批模型调用，没有进度就是黑箱。
@@ -235,27 +311,66 @@ class ReviewPipeline:
         return build_messages(self.system_prompt, payload)
 
     def _second_pass(
-        self, batch: Sequence[StringItem], *, terms: dict[str, dict]
-    ) -> dict[int, tuple[str, str]]:
+        self, batch: Sequence[StringItem], *, terms: dict[str, dict], budget_check=None
+    ) -> tuple[dict[int, tuple[str, str]], str]:
+        """模型二审。返回 (verdict 表, 失败原因)。
+
+        模型不可用时**不阻断**确定性 QA（设计如此），但原因必须回到主线程：
+        原先直接 `return {}`，于是"整批二审失败"与"这批谁都没问题"长得一模一样，
+        `failed_batches` 永远是 0，日志只剩「通过 0，打回 0」。
+        """
+        # 每批调用前查一次预算：任务是长跑，只在开始时查等于不查
+        if budget_check is not None:
+            try:
+                budget_check()
+            except BudgetExceeded as exc:
+                return {}, f"BudgetExceeded: {exc}"
         try:
-            raw = self.llm.chat(self._build_messages(batch, terms=terms), json_mode=True)
+            raw = self.llm.chat(
+                self._build_messages(batch, terms=terms),
+                json_mode=True,
+                json_schema=REVIEW_SCHEMA,
+            )
             data = extract_json(raw)
         except LLMNotConfigured:
             raise
-        except LLMError:
-            # 模型不可用时不阻断：确定性 QA 已过的条目按通过处理
-            return {}
+        except LLMError as exc:
+            return {}, f"{type(exc).__name__}: {exc}"
         out: dict[int, tuple[str, str]] = {}
         items = data.get("items") if isinstance(data, dict) else data
+        if not items:
+            # 回话了但没有 items：以前这里安静地返回空表，最后只显示"未判定 N"，
+            # 没人知道是模型没给数组、还是被截断、还是形状换了。
+            self._log(f"二审返回里没有 items 数组（原始输出前 120 字：{str(raw)[:120]}）")
+            return out, ""
+        bad_id = bad_verdict = alias_used = 0
         for it in items or []:
             if not isinstance(it, dict):
+                bad_id += 1
                 continue
             try:
                 sid = int(it["id"])
             except (KeyError, TypeError, ValueError):
+                bad_id += 1
                 continue
-            out[sid] = (_norm_verdict(it.get("verdict")), str(it.get("reason", ""))[:200])
-        return out
+            raw_verdict = it.get("verdict")
+            if raw_verdict is None:
+                for key in _VERDICT_KEYS[1:]:
+                    if key in it:
+                        raw_verdict = it[key]
+                        alias_used += 1
+                        break
+            verdict = _norm_verdict(raw_verdict)
+            if not verdict:
+                bad_verdict += 1
+            out[sid] = (verdict, str(it.get("reason", ""))[:200])
+        if bad_id or bad_verdict or alias_used:
+            # 这三个计数是"为什么全在未判定"的唯一线索，必须进日志
+            self._log(
+                f"二审返回 {len(items)} 条：id 认不出 {bad_id} 条、verdict 认不出 {bad_verdict} 条"
+                + (f"、用了别名键 {alias_used} 条" if alias_used else "")
+            )
+        return out, ""
 
     # ------------------------------------------------------------------ 执行
     def run(
@@ -266,9 +381,23 @@ class ReviewPipeline:
         dry_run: bool = False,
         include_disputed: bool = False,
         max_items: int = DEFAULT_MAX_ITEMS,
+        on_items: "Callable[[list[dict]], None] | None" = None,
+        budget_check: "Callable[[], None] | None" = None,
     ) -> ReviewStats:
+        """跑一轮校对。
+
+        `on_items` 是逐条回调（WebUI 的「AI 正在处理的词条」与文件视图靠它实时刷新）：
+        判定完成时推一次终态（pass / dispute / reset / skip），写完 stage 再推一次
+        `written`（带新 stage）。它只做展示，成败一律以 stats 为准。
+        """
         cfg = self.cfg.review
+        budget_check = budget_check or self.budget_check
         stats = ReviewStats(dry_run=dry_run)
+        # 演练模式：判定是真的、但 stage 没改。事件带上 dry_run，界面才不会
+        # 把"校对通过"当成平台已更新。
+        if on_items is not None and dry_run:
+            _sink = on_items
+            on_items = lambda rows: _sink([{**r, "dry_run": True} for r in rows])  # noqa: E731
         targets = self._collect(
             task=task,
             limit=limit,
@@ -371,7 +500,7 @@ class ReviewPipeline:
 
             results = self.llm.map_concurrent(
                 batches,
-                partial(self._second_pass, terms=terms),
+                partial(self._second_pass, terms=terms, budget_check=budget_check),
                 concurrency=self.cfg.llm.concurrency,
                 on_done=_progress,
             )
@@ -379,11 +508,18 @@ class ReviewPipeline:
             for res in results:
                 if isinstance(res, LLMNotConfigured):
                     raise res
-                if isinstance(res, dict):
-                    verdicts.update(res)
+                if isinstance(res, tuple):
+                    got, err = res
+                    verdicts.update(got)
+                    if err:
+                        if err.startswith("BudgetExceeded"):
+                            stats.budget_stopped = True
+                        else:
+                            stats.failed_batches += 1
+                        if err not in stats.errors and len(stats.errors) < 5:
+                            stats.errors.append(err)
                 else:
-                    # 整批失败（LLMError 等）：这批没有 verdict，后续按"未判定"跳过
-                    stats.skipped_no_verdict += 0
+                    # 旧形状/意外异常：这批没有 verdict，按"未判定"处理并留痕
                     stats.failed_batches += 1
             for s in to_llm:
                 # 模型漏回 verdict / 整批失败时**绝不能当通过**——那会把没审的词条
@@ -421,9 +557,37 @@ class ReviewPipeline:
             f" · 未判定 {stats.skipped_no_verdict} · 失败批 {stats.failed_batches}）"
         )
 
+        if on_items is not None:
+            # 判定的结果立刻推给界面：等整个流程跑完再刷新的话，长任务里
+            # 用户几百秒都看不到"这条到底过了还是被打回"。
+            dispute_set, pass_set, reset_set = set(dispute_ids), set(local_pass), set(reset_ids)
+            rows: list[dict] = []
+            for s in targets:
+                if s.id in dispute_set:
+                    status, why = "dispute", reasons.get(s.id, "校对不通过")
+                elif s.id in pass_set:
+                    status, why = "pass", ""
+                elif s.id in reset_set:
+                    status, why = "reset", "译文为空，重置为未翻译"
+                else:
+                    status, why = "skip", "模型未给判定，保持原状"
+                rows.append(
+                    {
+                        "id": s.id,
+                        "original": s.original,
+                        "translation": s.translation,
+                        "status": status,
+                        "reason": why,
+                    }
+                )
+            for part in _chunks(rows):
+                on_items(part)
+
         # 3) 写回 stage
         if dry_run:
-            stats.written = len(dispute_ids) + len(local_pass) + len(reset_ids)
+            # 与 translate 同一口径：written 表示"真的写了"，演练时恒为 0，
+            # 预估值单独给 would_write（否则 Agent/报表会把演练当成已落库）。
+            stats.would_write = len(dispute_ids) + len(local_pass) + len(reset_ids)
             return stats
 
         def _write(ids: list[int], stage: Stage, action: str, label: str) -> None:
@@ -431,14 +595,38 @@ class ReviewPipeline:
 
             不能用 `len(res)`：平台有只回 `{"update": N}` 的形状，那时 id 列表
             为空而 stage 已经改完，报表会写成「写回 0 条」。
+
+            **按块提交**：`client.set_stage` 内部就按 500 分块，中途失败时前面
+            已改完的块在 stats/账本里完全不可见（translate 那边为同一个坑做了
+            `_write_chunks` + `WriteInterrupted`）。这里自己分块，每块成功立即
+            记账，失败则带着「已写入多少」抛出。
             """
-            res = self.client.set_stage(ids, stage)
-            stats.written += res.reported
-            for sid in ids:
-                self.store.ledger_mark(self.name, str(sid), action)
-            if res.reported > len(res):
-                # 条数对不上 id 明细时留痕：数字是真的，但具体改了哪些查不到
-                self._log(f"{label}：平台报告更新 {res.reported} 条，未返回 id 明细")
+            from ..client import BATCH_LIMIT
+
+            for start in range(0, len(ids), BATCH_LIMIT):
+                part = ids[start : start + BATCH_LIMIT]
+                try:
+                    res = self.client.set_stage(part, stage)
+                except Exception as exc:  # noqa: BLE001 - 中途失败必须先保住已记账的部分
+                    stats.warnings.append(
+                        f"{label}中断（{type(exc).__name__}: {exc}）："
+                        f"已写入 {stats.written} 条并已记账，"
+                        f"剩余 {len(ids) - start} 条未改 stage"
+                    )
+                    raise StageWriteInterrupted(
+                        f"{label}中断：已写入 {stats.written} 条（已记账），"
+                        f"剩余 {len(ids) - start} 条未改 stage"
+                        f"（{type(exc).__name__}: {exc}）",
+                        stats,
+                    ) from exc
+                stats.written += res.reported
+                for sid in part:
+                    self.store.ledger_mark(
+                        self.name, str(sid), action, project=self.client.project_id
+                    )
+                if res.reported > len(res):
+                    # 条数对不上 id 明细时留痕：数字是真的，但具体改了哪些查不到
+                    self._log(f"{label}：平台报告更新 {res.reported} 条，未返回 id 明细")
 
         if dispute_ids:
             _write(dispute_ids, Stage(cfg.fail_stage), "dispute", "打回")
@@ -447,6 +635,19 @@ class ReviewPipeline:
         if local_pass:
             _write(local_pass, Stage(cfg.pass_stage), "pass", "通过")
         self.store.ledger_commit()
+        if on_items is not None:
+            # 写回成功后推新 stage：界面上的阶段徽章据此就地变（3 已检查 / 2 有疑问）
+            stage_rows: list[dict] = []
+            for ids, stage in (
+                (dispute_ids, Stage(cfg.fail_stage)),
+                (reset_ids, Stage.UNTRANSLATED),
+                (local_pass, Stage(cfg.pass_stage)),
+            ):
+                stage_rows.extend(
+                    {"id": i, "status": "written", "stage": int(stage)} for i in ids
+                )
+            for part in _chunks(stage_rows):
+                on_items(part)
         # 用平台实际更新的条数，而不是"我们打算改多少"
         self._log(f"stage 写回完成：{stats.written} 条")
 
@@ -486,7 +687,9 @@ class ReviewPipeline:
         结果废掉更亏。所以折中：照发，但把原因写进 `stats.issue_error`。
         """
         try:
-            issues = self.client.list_issues(status=0)
+            # 跨页找：只看第一页时，未关闭讨论一多，台账帖就被挤出第 1 页 →
+            # 以为没有 → 每轮新建一条重复帖。
+            issues = list(self.client.iter_issues(status=0))
         except Exception as exc:  # noqa: BLE001
             if stats is not None:
                 stats.issue_error = (

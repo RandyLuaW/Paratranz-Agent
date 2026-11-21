@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from ..client import ParaTranzClient
 from ..config import AgentConfig, LLMCfg
+from ..errors import BudgetExceeded
 from ..llm import BaseLLM, UsageEvent, UnavailableLLM, build_llm
 from ..pipelines import (
     GlossaryPipeline,
@@ -25,8 +26,9 @@ from ..pipelines import (
 )
 from ..store import Store
 from .extensions import ExtensionStore
-from .jobs import current_job
+from .jobs import ToolFailed, current_job
 from .logs import LogStore
+from .params import as_bool, as_int
 from .redact import make_redactor
 from .settings import RuntimeSettings, SettingsStore, join_ref
 from .usage import BudgetConfig, UsageStore
@@ -40,10 +42,14 @@ from .usage import BudgetConfig, UsageStore
 # 放在这里之后，三条路共用同一道闸。
 DANGEROUS_TOOLS = frozenset({"extract", "extractor_generate", "extractor_improve"})
 
+# 配置类错误：客户端改一下设置就能解决，不该按 500 报（见 app.py 的处理器）
+class NotConfigured(RuntimeError):
+    """缺少 Token / 项目编号这类「去设置页填一下就好」的状态。"""
 
-def require_risk_ack(tool: str, accept_risk: bool) -> None:
+
+def require_risk_ack(tool: str, accept_risk: object) -> None:
     """危险工具缺少显式确认时抛 `PermissionError`（任务终态 failed，拦在动手之前）。"""
-    if tool in DANGEROUS_TOOLS and not accept_risk:
+    if tool in DANGEROUS_TOOLS and not as_bool(accept_risk, name="accept_risk"):
         raise PermissionError(
             f"{tool} 等于在本机执行任意代码，需要先勾选风险确认（accept_risk=true）"
         )
@@ -68,8 +74,12 @@ class AppContext:
         )
         self.extensions = ExtensionStore(state_dir)
         self._lock = threading.Lock()
+        # 写平台数据的互斥锁：批量/单条人工写与 worker 之外的入口共用，
+        # 避免两次并发批量互相覆盖 stage（审计实测：后写覆盖前写、账本只剩一条）
+        self.write_lock = threading.RLock()
         self._client: ParaTranzClient | None = None
         self._store: Store | None = None
+        self._retired: list[ParaTranzClient] = []
         self._llms: dict[str, BaseLLM] = {}
         self._llm_fps: dict[str, tuple] = {}
         self._cfg_cache: tuple[RuntimeSettings, str, AgentConfig] | None = None
@@ -81,7 +91,40 @@ class AppContext:
 
     def _fp(self) -> tuple:
         s = self.settings
-        return (s.project_id, s.token, s.base_url, s.llm_base_url, s.llm_model, s.llm_key)
+        # `rate_limit_per_min` 必须进指纹：它被固化进 RateLimiter，
+        # 不进指纹就等于「设置页把 420 改成 60、保存成功、实际还按 420 打」。
+        return (
+            s.project_id, s.token, s.base_url, s.rate_limit_per_min,
+            s.llm_base_url, s.llm_model, s.llm_key,
+        )
+
+    def client_for(
+        self,
+        *,
+        token: str,
+        project_id: int,
+        base_url: str,
+        rate_limit_per_min: int,
+    ) -> ParaTranzClient:
+        """按**显式参数**建一个客户端（唯一构造点）。
+
+        「测试连接」要用界面上正在填的值试，而不是已保存的那份 —— 否则
+        「改了编号 → 点测试 → 报的还是上个编号的错」，用户永远对不上。
+        这类临时客户端不进缓存、不落盘，调用方负责 close()。
+        """
+        if self.mock:
+            # 演示/自测：内存假平台，状态落盘，命令之间连续
+            from ..fake import FakeParaTranz
+
+            return FakeParaTranz(
+                persist_path=str(self.state_dir / "fake_platform.json")
+            ).client()
+        return ParaTranzClient(
+            token=token,
+            project_id=project_id or 1,
+            base_url=base_url,
+            rate_limit_per_min=rate_limit_per_min,
+        )
 
     def _ensure(self) -> None:
         with self._lock:
@@ -89,22 +132,17 @@ class AppContext:
             if self._fingerprint == fp and self._client is not None:
                 return
             if self._client is not None:
-                self._client.close()
+                # **不立刻 close**：任务可能正拿着它发请求，
+                # 中途保存设置会让正在跑的任务报 "client has been closed"。
+                # 统一在 close() 时回收。
+                self._retired.append(self._client)
             s = self.settings
-            if self.mock:
-                # 演示/自测：内存假平台，状态落盘，命令之间连续
-                from ..fake import FakeParaTranz
-
-                self._client = FakeParaTranz(
-                    persist_path=str(self.state_dir / "fake_platform.json")
-                ).client()
-            else:
-                self._client = ParaTranzClient(
-                    token=s.token,
-                    project_id=s.project_id or 1,
-                    base_url=s.base_url,
-                    rate_limit_per_min=s.rate_limit_per_min,
-                )
+            self._client = self.client_for(
+                token=s.token,
+                project_id=s.project_id or 1,
+                base_url=s.base_url,
+                rate_limit_per_min=s.rate_limit_per_min,
+            )
             self._llms.clear()
             self._llm_fps.clear()
             if self._store is None:
@@ -136,10 +174,16 @@ class AppContext:
     def budget_cfg(self) -> BudgetConfig:
         return BudgetConfig.from_dict(self.settings.budget or {})
 
-    def check_budget(self, *, job_id: str = "") -> dict[str, Any]:
-        return self.usage.check_budget(
-            self.budget_cfg, job_id=job_id, model=self.settings.llm_model
-        )
+    def check_budget(self, *, job_id: str = "", task: str = "") -> dict[str, Any]:
+        """预算检查。`model` 必须取**真正会用到的模型**。
+
+        以前传的是 `settings.llm_model`（旧的单模型字段，默认 gpt-4o-mini），
+        而 `usage.model` 列记的是路由解析出来的真实模型 ——
+        `WHERE model=?` 永远匹配 0 行，「单模型每日预算」结构性永不触发。
+        """
+        got = self.settings.resolve_for(task)
+        model = got[1].id if got else ""
+        return self.usage.check_budget(self.budget_cfg, job_id=job_id, model=model)
 
     @property
     def client(self) -> ParaTranzClient:
@@ -170,10 +214,16 @@ class AppContext:
         return self._build_llm(p, m)
 
     def _build_llm(self, p, m) -> BaseLLM:
+        # 并发调用（多个 worker 同时首批）时，`_llms` 的读写必须加锁：
+        # 无锁时可能建出两份实例，用量记账与 json 协商结果会分裂
+        with self._lock:
+            return self._build_llm_locked(p, m)
+
+    def _build_llm_locked(self, p, m) -> BaseLLM:
         ref = join_ref(p.id, m.id)
         fp = (
             p.base_url, p.api_key, m.id, m.temperature, m.max_tokens,
-            p.timeout, p.max_retries, p.concurrency,
+            p.timeout, p.max_retries, p.concurrency, p.proxy,
             tuple(sorted((m.extra_params or {}).items())),
             tuple(sorted((p.headers or {}).items())),
         )
@@ -192,6 +242,7 @@ class AppContext:
                 concurrency=p.concurrency,
                 extra_params=dict(m.extra_params or {}),
                 headers=dict(p.headers or {}),
+                proxy=p.proxy or "",
             )
         )
         llm.on_usage = self._on_usage
@@ -236,6 +287,12 @@ class AppContext:
             if self._client:
                 self._client.close()
                 self._client = None
+            for old in self._retired:      # 延迟回收的旧客户端（见 _ensure）
+                try:
+                    old.close()
+                except Exception:  # noqa: BLE001 - 关闭失败不该挡住退出
+                    pass
+            self._retired.clear()
             if self._store:
                 self._store.close()
                 self._store = None
@@ -252,12 +309,33 @@ class ToolSpec:
     writes: bool  # 是否会写平台（前端据此标红/二次确认）
 
 
+def agent_needs_confirm(tool: str) -> bool:
+    """`/api/agent`（自然语言入口）是否必须拦住这个工具。
+
+    判定依据是 **TOOL_SPECS 里的 `agent` 标记**（唯一来源，不再手维护第二份名单）：
+    `allow` = 可以直接执行，`confirm` = 只给建议、由用户到页面手动执行。
+    **缺标记、或工具名不认识，一律按「要确认」处理** —— 新增工具忘了标记时被拦住，
+    而不是默默放行。这一条是拿真实绕过换来的：黑名单当初只写了 extract 系，
+    于是 `writeback --in-place`（覆盖游戏原文件）和 `extraction_import`（不可撤回地
+    往平台建词条）都能由模型一句话直接跑。
+    """
+    for spec in TOOL_SPECS:
+        if spec["name"] == tool:
+            return str(spec.get("agent", "confirm")) != "allow"
+    return True
+
+
 # --------------------------------------------------------------------- 工具实现
 def _budget_guard(ctx: AppContext, job, runner) -> None:
-    """写操作前的预算护栏。stop 直接拦，warn 只记，downgrade 提示切备用模型。"""
+    """写操作前的预算护栏。stop 直接拦，warn 只记，downgrade 提示切备用模型。
+
+    粒度说明（别当成已解决）：这是**步骤前**检查。`run`（全流程）每一步都会过
+    一次，所以第 2 步起就能看到前面步骤的花费；但单跑一次 translate 这类长任务
+    是在批循环内部花钱的，中途没有检查点，只能事后看报表。
+    """
     if job is None:
         return
-    verdict = ctx.check_budget(job_id=job.id)
+    verdict = ctx.check_budget(job_id=job.id, task=job.tool)
     action = verdict.get("action", "ok")
     if action == "ok":
         return
@@ -283,9 +361,9 @@ def _guard(ctx: AppContext) -> None:
         return
     s = ctx.settings
     if not s.token:
-        raise RuntimeError("尚未配置 ParaTranz Token，请到「设置」页填写")
+        raise NotConfigured("尚未配置 ParaTranz Token，请到「设置」页填写")
     if not s.project_id:
-        raise RuntimeError("尚未配置项目编号，请到「设置」页填写")
+        raise NotConfigured("尚未配置项目编号，请到「设置」页填写")
 
 
 def _dir_rollup(files: list) -> list[dict]:
@@ -406,36 +484,65 @@ def _preflight(ctx: AppContext, job, runner) -> None:
     _budget_guard(ctx, job, runner)
 
 
-def _pipeline(ctx: AppContext, kind: str):
+def _pipeline(ctx: AppContext, kind: str, *, job=None, runner=None):
     """按环节构造流水线。
 
     这三项必须**成套**出现：给哪个任务选模型（`llm_for`）、用哪套配置（`cfg_for`）、
     注入哪段提示词（`prompt_for`）。原先在四个工具里各写一遍——漏改一处，
     那个环节就会悄悄退回默认模型而没人发现。集中到这里，想漏也漏不了。
+
+    `log=` 也必须在这里传：ReviewPipeline 的「二审进度 / 未判定 N / 失败批 M」
+    全靠它，只在 CLI 传等于 WebUI 里把这些诊断直接丢掉。
     """
     cls, needs_llm = _PIPELINES[kind]
     if not needs_llm:
         return cls(ctx.client, ctx.cfg, ctx.store)
-    return cls(
-        ctx.client, ctx.cfg_for(kind), ctx.store, ctx.llm_for(kind),
-        system_prompt=ctx.settings.prompt_for(kind),
-    )
+    llm = ctx.llm_for(kind)
+    # 上一轮任务留下的降档说明属于上一轮：不清掉的话每份报表都会重复贴历史警告，
+    # 用户分不清"这次又降档了"还是"早就降过"。
+    notes = getattr(llm, "json_warnings", None)
+    if isinstance(notes, list):
+        notes.clear()
+    kwargs: dict[str, Any] = {"system_prompt": ctx.settings.prompt_for(kind)}
+    if cls is ReviewPipeline and job is not None and runner is not None:
+        kwargs["log"] = lambda msg: runner.log(job, msg)
+    if job is not None and runner is not None and cls in (TranslatePipeline, ReviewPipeline):
+        # **任务内**预算检查点：翻译/校对是在批循环里花钱的，
+        # 只在任务开始时查一次，中途超支到跑完才发现（第七轮遗留）。
+        def _budget_gate() -> None:
+            verdict = ctx.check_budget(job_id=job.id, task=job.tool)
+            if verdict.get("action") == "stop":
+                raise BudgetExceeded(verdict.get("reason") or "预算超限，已停止本任务")
+
+        kwargs["budget_check"] = _budget_gate
+    return cls(ctx.client, ctx.cfg_for(kind), ctx.store, llm, **kwargs)
 
 
 def _limit_of(ctx: AppContext, kw: dict) -> int:
-    """单次运行条数上限：显式传参 > 设置页默认值。"""
-    return kw.get("limit") or ctx.settings.per_run_limit
+    """单次运行条数上限：显式传参 > 设置页默认值。
+
+    不能写成 `kw.get("limit") or 默认值`：`{"limit": 0}` 会被当成"没给"，于是按
+    默认 200 条**真写平台**；`{"limit": "50"}` 会把字符串带进 `len(...) >= "50"`
+    抛 TypeError。这里显式判 None 并转成整数。
+    """
+    v = kw.get("limit")
+    if v is None or v == "":
+        return ctx.settings.per_run_limit
+    return as_int(v, name="limit")
 
 
 def _dry_of(ctx: AppContext, kw: dict) -> bool:
-    """是否演练：显式传参 > 设置页默认值。"""
-    return ctx.settings.dry_run if kw.get("dry_run") is None else bool(kw["dry_run"])
+    """是否演练：显式传参 > 设置页默认值。字符串 `"false"` 必须解析成 False。"""
+    v = kw.get("dry_run")
+    if v is None:
+        return ctx.settings.dry_run
+    return as_bool(v, name="dry_run")
 
 
-def tool_plan(ctx: AppContext, *, job=None, runner=None, dry_run: bool | None = None, **_: Any) -> dict:
+def tool_plan(ctx: AppContext, *, job=None, runner=None, dry_run: Any = None, **_: Any) -> dict:
     _preflight(ctx, job, runner)
-    dry = ctx.settings.dry_run if dry_run is None else dry_run
-    pipe = _pipeline(ctx, "plan")
+    dry = ctx.settings.dry_run if dry_run is None else as_bool(dry_run, name="dry_run")
+    pipe = _pipeline(ctx, "plan", job=job, runner=runner)
     planned = pipe.build_plan()
     if job and runner:
         for p in planned:
@@ -450,40 +557,173 @@ def tool_plan(ctx: AppContext, *, job=None, runner=None, dry_run: bool | None = 
     }
 
 
+def _is_hard_failure(stats: Any) -> bool:
+    """「取材非空但一条没写」里，哪些属于真故障。
+
+    故障证据：模型报错 / 全被 QA 拦 / 复查不可用 / 分块写回失败 /
+    **模型回了但一条都没给**（`failed` 计数）。
+    不属于故障：全被别人抢先翻译（force_overwrite=false 放过）——
+    那是保护人工译文，报 failed 会让人以为软件坏了。
+    """
+    return bool(
+        stats.errors or stats.blocked or stats.manual_risk
+        or stats.write_chunks_failed or stats.failed
+    )
+
+
+def _why_nothing_written(stats: Any) -> str:
+    """「取材非空但一条都没写」的确切原因。
+
+    这句话存在的理由：真实事故里任务日志只有「处理 0 条」然后「完成」，
+    用户完全无法判断是网关 400、是全被 QA 拦了、还是白名单没匹配上。
+    """
+    if stats.errors:
+        return f"模型调用全部失败：{stats.errors[0]}"
+    if stats.files_unmatched:
+        return "translate.files 白名单没有匹配到任何文件，本轮没有取材"
+    if stats.skipped_manual:
+        return (
+            f"{stats.skipped_manual} 条在取材之后已被他人翻译/改过 stage，"
+            "按 force_overwrite=false 全部放过（这是保护人工译文，不是故障）"
+        )
+    if stats.manual_risk:
+        return "写回前的人工译文复查不可用（网络/限流），为防覆盖人工译文，本轮整轮未写入"
+    if stats.blocked:
+        first = (stats.blocked_samples or [{}])[0]
+        return (
+            f"{stats.blocked} 条全部被 QA 拦下（占位符/控制符不一致或空译文），一条未写入；"
+            f"例：{str(first.get('reason') or '')[:80]}"
+        )
+    if stats.failed:
+        return f"模型返回了，但 {stats.failed} 条都没给译文（id 对不上或 items 为空）"
+    return f"取材 {stats.fetched} 条，但没有任何一条写入成功"
+
+
+def _ids_of(kw: dict) -> list[int] | None:
+    """点名要处理的词条 id（WebUI 批量选择用）。最多 500 条。"""
+    raw = kw.get("ids")
+    if not raw:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("ids 必须是数组（点名要重翻的词条 id 列表）")
+    out: list[int] = []
+    for x in raw[:500]:
+        out.append(as_int(x, name="ids[i]"))
+    return out or None
+
+
 def tool_translate(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
     _preflight(ctx, job, runner)
     limit, dry = _limit_of(ctx, kw), _dry_of(ctx, kw)
-    pipe = _pipeline(ctx, "translate")
+    ids = _ids_of(kw)
+    if ids:
+        # 点名要的就是"这些"，再按 per_run_limit 截断会静默少翻几条
+        # （审计实测：ids=3 而 per_run_limit=2 → 只翻 2 条，日志还写"3 条"）。
+        limit = len(ids)
+    pipe = _pipeline(ctx, "translate", job=job, runner=runner)
+    on_items = (lambda rows: runner.item(job, rows)) if (job and runner) else None
     if job and runner:
-        runner.log(job, f"拉取未翻译词条，上限 {limit} 条")
-    stats = pipe.run(limit=limit, dry_run=dry)
+        runner.log(
+            job,
+            f"点名重翻 {len(ids)} 条（只处理这些，不再按阶段取材）" if ids
+            else f"拉取未翻译词条，上限 {limit} 条",
+        )
+    stats = pipe.run(limit=limit, dry_run=dry, on_items=on_items, ids=ids)
+    out = stats.as_dict()
+    out["samples"] = stats.blocked_samples[:20]
+    # 演练模式下 written 恒为 0，"有没有产出"要看 would_write
+    produced = stats.would_write if dry else stats.written
     if job and runner:
         tag = "（演练模式：仅预览，未写入平台）" if dry else ""
-        runner.log(job, f"处理 {stats.written} 条{tag}，TM 命中 {stats.tm_hit}，拦截 {stats.blocked}")
-    return stats.as_dict()
+        written_txt = f"将写入 {stats.would_write} 条" if dry else f"写入 {stats.written} 条"
+        # 一行里必须能看出「取材多少 / 写进去多少 / 失败多少」：
+        # 只报 written 的老写法让"全程 0 条"和"翻完了"长得一模一样。
+        runner.log(
+            job,
+            f"取材 {stats.fetched} 条 → {written_txt}{tag}；"
+            f"TM 命中 {stats.tm_hit}，被拦 {stats.blocked}，失败 {stats.failed}",
+        )
+        for note in stats.warnings:
+            runner.log(job, note, level="warn")
+        for err in stats.errors:
+            runner.log(job, f"模型调用失败：{err}", level="error")
+    if stats.fetched and not produced:
+        # 取材了却一条没产出：分两种，别混着报。
+        # ①有明确故障证据（模型报错/一条没回/全被 QA 拦/复查不可用/分块失败）→ 必须 failed；
+        # ②只是"没活可干"（全被别人抢先翻译、>force_overwrite=false 放过）→ 不算失败，
+        #    但也绝不能用一句「完成」糊过去，得把原因写进日志与结果。
+        hard = _is_hard_failure(stats)
+        if hard:
+            raise ToolFailed(_why_nothing_written(stats), out)
+        out["reason"] = _why_nothing_written(stats)
+        if job and runner:
+            runner.log(job, f"本轮没有写入任何条目：{out['reason']}", level="warn")
+    if not stats.fetched:
+        # 一条都没取到：不是失败，但也绝不能只显示「完成」——
+        # 真实场景里这既可能是"项目已全部翻译"，也可能是阶段/文件/白名单条件不匹配，
+        # 还可能是 min_length 把所有短句都跳过了（这一种以前根本没提，用户会以为平台空了）。
+        if stats.files_unmatched:
+            why = "translate.files 白名单没有匹配到任何文件"
+        elif stats.skipped_short:
+            why = (
+                f"取到的 {stats.skipped_short} 条原文都短于 translate.min_length，被整批跳过"
+            )
+        elif stats.manual_risk:
+            why = "写前人工译文复查不可用，本轮未取材"
+        else:
+            why = "当前条件下没有未翻译词条（项目可能已全部翻译，或阶段已不是未翻译）"
+        out["reason"] = why
+        if job and runner:
+            runner.log(job, f"没有取到可翻译的词条：{why}", level="warn")
+    return out
 
 
 def tool_review(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
     _preflight(ctx, job, runner)
     limit, dry = _limit_of(ctx, kw), _dry_of(ctx, kw)
-    pipe = _pipeline(ctx, "review")
-    stats = pipe.run(limit=limit, dry_run=dry, include_disputed=bool(kw.get("include_disputed")))
+    pipe = _pipeline(ctx, "review", job=job, runner=runner)
+    on_items = (lambda rows: runner.item(job, rows)) if (job and runner) else None
+    stats = pipe.run(
+        limit=limit, dry_run=dry, include_disputed=as_bool(kw.get("include_disputed"), name="include_disputed"),
+        on_items=on_items,
+    )
     if job and runner:
         tag = "（演练模式：未改 stage）" if dry else ""
-        runner.log(job, f"通过 {stats.passed}，打回 {stats.disputed}{tag}")
+        changed = f"将改 {stats.would_write} 条" if dry else f"改 stage {stats.written} 条"
+        runner.log(
+            job,
+            f"取材 {stats.fetched} 条 → 通过 {stats.passed}，打回 {stats.disputed}，{changed}{tag}；"
+            f"QA 拦 {stats.qa_blocked}，模型打回 {stats.llm_blocked}，"
+            f"未判定 {stats.skipped_no_verdict}，失败批 {stats.failed_batches}",
+        )
+        for note in stats.warnings:
+            runner.log(job, note, level="warn")
+        for err in stats.errors:
+            runner.log(job, f"模型二审失败：{err}", level="error")
     out = stats.as_dict()
     out["samples"] = stats.samples[:20]
+    # 一条 stage 都没改、却有二审失败/未判定 → 不能报"完成"
+    if stats.fetched and not (stats.would_write if dry else stats.written) and (
+        stats.errors or stats.failed_batches
+    ):
+        raise ToolFailed(
+            f"{stats.failed_batches} 批模型二审失败（{stats.errors[0] if stats.errors else '原因未知'}），"
+            f"本轮未改任何词条的状态",
+            out,
+        )
     return out
 
 
 def tool_glossary(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
     _preflight(ctx, job, runner)
     dry = _dry_of(ctx, kw)
-    pipe = _pipeline(ctx, "glossary")
+    pipe = _pipeline(ctx, "glossary", job=job, runner=runner)
     cands = pipe.build()
     if job and runner:
         runner.log(job, f"抽取到 {len(cands)} 个候选术语")
-    res = pipe.publish(cands, dry_run=dry, overwrite=bool(kw.get("overwrite")))
+    res = pipe.publish(
+        cands, dry_run=dry, overwrite=as_bool(kw.get("overwrite"), name="overwrite")
+    )
     if job and runner and dry:
         runner.log(job, "演练模式：未写入术语表")
     return {**res, "candidates": [c.as_import() for c in cands][:100]}
@@ -492,8 +732,9 @@ def tool_glossary(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
 def tool_styleguide(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
     _preflight(ctx, job, runner)
     dry = _dry_of(ctx, kw)
-    pipe = _pipeline(ctx, "styleguide")
-    md = pipe.build(with_llm=bool(kw.get("with_llm", True)))
+    pipe = _pipeline(ctx, "styleguide", job=job, runner=runner)
+    md = pipe.build(with_llm=as_bool(kw.get("with_llm") if kw.get("with_llm") is not None else True,
+                                    name="with_llm"))
     res = pipe.publish(md, dry_run=dry)
     if job and runner and dry:
         runner.log(job, "演练模式：未发布公告")
@@ -522,10 +763,27 @@ def tool_run(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict:
             runner.log(job, f"── {name} ──")
         try:
             out[name] = fn(ctx, job=job, runner=runner, **kw)
+            if name in ("glossary", "styleguide") and isinstance(out[name], dict):
+                # 全流程走的是未包装本体，注册表那层的 llm_notes 补不到这里
+                notes = _llm_notes(ctx, name)
+                if notes:
+                    merged = list(out[name].get("llm_notes") or [])
+                    out[name]["llm_notes"] = merged + [n for n in notes if n not in merged]
+        except ToolFailed as exc:
+            # 这一步"跑了但不算成功"：报表要留下（取材/失败/原因），
+            # 否则全流程的结果里只剩一句 error，跟单跑该工具看到的东西对不上。
+            out[name] = {**(exc.result or {}), "error": str(exc)}
+            if job and runner:
+                runner.log(job, f"{name} 未完成：{exc}", level="error")
         except Exception as exc:  # noqa: BLE001 - 单步失败不阻断后续
             out[name] = {"error": f"{type(exc).__name__}: {exc}"}
             if job and runner:
                 runner.log(job, f"{name} 失败：{exc}", level="error")
+    # 有任何环节没跑成就不能报 done：全流程最容易掩盖单步失败，
+    # 界面只显示"完成"时，用户不会知道翻译其实一条没写成。
+    bad = [k for k, v in out.items() if isinstance(v, dict) and v.get("error")]
+    if bad:
+        raise ToolFailed(f"全流程有 {len(bad)} 个环节未完成：{'、'.join(bad)}", out)
     return out
 
 
@@ -783,12 +1041,12 @@ def tool_writeback(
     ctx: AppContext,
     *,
     extraction_id: str = "",
-    min_stage: int = 3,
-    out_dir: str = "",
-    mode: str = "mirror",
-    in_place: bool = False,
-    accept_risk: bool = False,
-    dry_run: bool | None = None,
+    min_stage: int | None = None,
+    out_dir: str | None = None,
+    mode: str | None = None,
+    in_place: Any = False,
+    accept_risk: Any = False,
+    dry_run: Any = None,
     platform_file: int = 0,
     job=None,
     runner=None,
@@ -799,17 +1057,26 @@ def tool_writeback(
     危险点在于 `in_place=True`：会直接覆盖游戏文件。所以要 `accept_risk`
     显式确认（与提取、导入一致的两道闸：前端弹窗 + 后端硬拦），
     并且原地写之前一定先备份到 state 目录。
+
+    三项默认值（门槛 / 形式 / 输出目录）跟随设置页：以前这里是硬编码默认值，
+    只有前端弹窗会预填，于是走 `POST /api/jobs {tool:"writeback"}` 时设置页
+    填的三项被完全忽略 —— 「保存成功但不生效」。
     """
     from ..writeback import WritebackError, run_writeback
 
     _guard(ctx)
+    s = ctx.settings
     # 演练模式是全局开关：显式传参优先，没传就跟随设置页，
     # 这样 `POST /api/jobs` 直投也不会绕过它。
     dry = _dry_of(ctx, {"dry_run": dry_run})
+    in_place_flag = as_bool(in_place, name="in_place")
     if not extraction_id:
         raise ValueError("缺少 extraction_id")
-    if in_place and not dry and not accept_risk:
+    if in_place_flag and not dry and not as_bool(accept_risk, name="accept_risk"):
         raise PermissionError("原地修改游戏文件必须显式确认（accept_risk）")
+    stage = int(min_stage if min_stage is not None else s.writeback_min_stage)
+    out = (out_dir if out_dir is not None else s.writeback_out_dir) or ""
+    wb_mode = (mode or s.writeback_mode or "mirror").strip()
 
     def log(msg: str, level: str = "info") -> None:
         if job and runner:
@@ -820,10 +1087,10 @@ def tool_writeback(
             client=ctx.client,
             state_dir=ctx.state_dir,
             job_id=extraction_id,
-            min_stage=int(min_stage or 3),
-            out_dir=out_dir,
-            mode=mode or "mirror",
-            in_place=bool(in_place),
+            min_stage=stage,
+            out_dir=out,
+            mode=wb_mode,
+            in_place=in_place_flag,
             dry_run=dry,
             platform_file=int(platform_file) or None,
             log=log,
@@ -860,26 +1127,58 @@ def tool_qa_check(ctx: AppContext, *, job=None, runner=None, original: str = "",
 
 
 # --------------------------------------------------------------------- 注册表
+def _llm_notes(ctx: AppContext, kind: str) -> list[str]:
+    """该环节解析出的模型实例上报的"传输层异常"（如网关不支持 json_object）。
+
+    集中在这里读一次：各 pipeline 里的 llm 实例是同一个（`llm_for` 按环节缓存），
+    所以不必每个工具自己 `getattr` 一遍。
+    """
+    try:
+        llm = ctx.llm_for(kind)
+    except Exception:  # noqa: BLE001 - 读不到备注不能影响业务结果
+        return []
+    return list(getattr(llm, "json_warnings", []) or [])
+
+
 def build_registry(ctx: AppContext) -> dict[str, Callable[..., dict]]:
-    def bind(fn):
-        return lambda **kw: fn(ctx, **kw)
+    """把工具函数绑定到 ctx，并在**唯一一处**补上"模型传输层备注"。
+
+    为什么放在这里而不是每个工具里：每个环节手抄一遍"把 llm.json_warnings 塞进
+    结果"迟早漏一处，而漏的那处就重新变成静默。
+
+    只管 `glossary` / `styleguide`：`translate` / `review` 有自己的 `warnings`
+    字段并且已经写进去了，这里再补一次就是同一句话出现两遍。
+    """
+    _NOTED = {"glossary", "styleguide"}
+
+    def bind(name, fn):
+        def call(**kw):
+            out = fn(ctx, **kw)
+            if name in _NOTED:
+                notes = _llm_notes(ctx, name)
+                if notes and isinstance(out, dict):
+                    merged = list(out.get("llm_notes") or [])
+                    out["llm_notes"] = merged + [n for n in notes if n not in merged]
+            return out
+
+        return call
 
     return {
-        "status": bind(tool_status),
-        "files": bind(tool_files),
-        "plan": bind(tool_plan),
-        "translate": bind(tool_translate),
-        "review": bind(tool_review),
-        "glossary": bind(tool_glossary),
-        "styleguide": bind(tool_styleguide),
-        "run": bind(tool_run),
-        "qa_check": bind(tool_qa_check),
-        "extract": bind(tool_extract),
-        "extractor_generate": bind(tool_extractor_generate),
-        "extractor_improve": bind(tool_extractor_improve),
-        "extraction_import": bind(tool_extraction_import),
-        "extraction_upload": bind(tool_extraction_upload),
-        "writeback": bind(tool_writeback),
+        "status": bind("status", tool_status),
+        "files": bind("files", tool_files),
+        "plan": bind("plan", tool_plan),
+        "translate": bind("translate", tool_translate),
+        "review": bind("review", tool_review),
+        "glossary": bind("glossary", tool_glossary),
+        "styleguide": bind("styleguide", tool_styleguide),
+        "run": bind("run", tool_run),
+        "qa_check": bind("qa_check", tool_qa_check),
+        "extract": bind("extract", tool_extract),
+        "extractor_generate": bind("extractor_generate", tool_extractor_generate),
+        "extractor_improve": bind("extractor_improve", tool_extractor_improve),
+        "extraction_import": bind("extraction_import", tool_extraction_import),
+        "extraction_upload": bind("extraction_upload", tool_extraction_upload),
+        "writeback": bind("writeback", tool_writeback),
     }
 
 
@@ -895,6 +1194,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "Read project progress, file count, tasks and term count",
         "params": {},
         "writes": False,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "GET /projects/{id}",
     },
     {
@@ -905,6 +1205,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "List all files with translation progress, busiest first",
         "params": {},
         "writes": False,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "GET /projects/{id}/files",
     },
     {
@@ -915,6 +1216,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "Pack untranslated volume into tasks with acceptance criteria and create them",
         "params": {"dry_run": "只预览不创建"},
         "writes": True,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "POST /projects/{id}/tasks",
     },
     {
@@ -925,6 +1227,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "TM hits pass straight through + LLM translation + placeholder guard + write stage=1",
         "params": {"limit": "本次最多处理条数"},
         "writes": True,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "PUT /projects/{id}/strings",
     },
     {
@@ -935,6 +1238,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "Deterministic QA + LLM second pass: pass → checked, fail → disputed",
         "params": {"limit": "本次最多处理条数", "include_disputed": "同时复核有疑问条目"},
         "writes": True,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "PUT /projects/{id}/strings (stage)",
     },
     {
@@ -945,6 +1249,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "Extract terms from finalized translations and import them in bulk",
         "params": {"overwrite": "覆盖译法不同的既有术语"},
         "writes": True,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "PUT /projects/{id}/terms",
     },
     {
@@ -955,6 +1260,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "Generate a style guide from the project's actual state and publish it as an announcement",
         "params": {"with_llm": "用模型润色风格章节"},
         "writes": True,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "POST /projects/{id}/announcements",
     },
     {
@@ -965,6 +1271,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "Assign → translate → review → glossary → style guide, all in one run",
         "params": {},
         "writes": True,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "多个",
         "endpoint_en": "Multiple",
     },
@@ -977,6 +1284,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "params": {"extractor_id": "提取器 id", "game_dir": "游戏目录", "options": "提取参数",
                    "accept_risk": "必填：确认执行本机代码的风险"},
         "writes": False,
+        "agent": "confirm",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "本地文件系统",
         "endpoint_en": "Local filesystem",
     },
@@ -989,6 +1297,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "params": {"game_dir": "游戏目录", "hint": "额外要求（可选）",
                    "accept_risk": "必填：确认执行本机代码的风险"},
         "writes": False,
+        "agent": "confirm",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "本地文件系统 + LLM",
         "endpoint_en": "Local filesystem + LLM",
     },
@@ -1002,6 +1311,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
                    "feedback": "改进要求（可选）",
                    "accept_risk": "必填：确认执行本机代码的风险"},
         "writes": False,
+        "agent": "confirm",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "本地文件系统 + LLM",
         "endpoint_en": "Local filesystem + LLM",
     },
@@ -1014,6 +1324,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "params": {"extraction_id": "提取记录 id", "file_id": "目标文件 id",
                    "force": "跳过校验错误"},
         "writes": True,
+        "agent": "confirm",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "POST /projects/{id}/strings",
     },
     {
@@ -1027,6 +1338,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "params": {"extraction_id": "提取记录 id", "filename": "上传文件名（须 .json 结尾）",
                    "path": "目标目录（可选，如 locale/）", "force": "跳过校验错误"},
         "writes": True,
+        "agent": "confirm",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "POST /projects/{id}/files",
     },
     {
@@ -1041,6 +1353,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
                    "in_place": "原地修改游戏文件（危险，需 accept_risk）",
                    "dry_run": "仅预览，不落盘"},
         "writes": True,
+        "agent": "confirm",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "本地文件（读平台 GET /strings）",
         "endpoint_en": "Local files (reads platform GET /strings)",
     },
@@ -1052,6 +1365,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description_en": "Run deterministic QA on one original/translation pair, right in the web UI",
         "params": {"original": "原文", "translation": "译文"},
         "writes": False,
+        "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "本地规则",
         "endpoint_en": "Local rules",
     },

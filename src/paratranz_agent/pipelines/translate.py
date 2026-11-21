@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from ..client import ParaTranzClient
+from ..errors import BudgetExceeded
 from ..config import AgentConfig
 from ..filematch import matches_any
 from ..llm import BaseLLM, LLMError, LLMNotConfigured, build_messages
@@ -47,6 +48,32 @@ WRITE_CHUNK = 500
 # 「后面还有」—— 触到上限时把 truncated 写进 stats，否则报表会假装全处理完了。
 DEFAULT_MAX_ITEMS = 20000
 
+# 逐条事件的单片大小：一次推几千条会让 SSE 事件体积失控（界面一次也只显示一屏）
+ITEM_EVENT_CHUNK = 50
+
+# 交给支持 structured outputs 的网关用的严格 schema（strict:true 时 OpenAI
+# 与中转站都要求 additionalProperties:false 且每个属性都在 required 里）。
+# 有它的好处是输出不会被截成"半句 JSON"；网关不支持时由 llm 层自动降档。
+TRANSLATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "translation": {"type": "string"},
+                },
+                "required": ["id", "translation"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
 
 @dataclass
 class TranslateStats:
@@ -71,6 +98,16 @@ class TranslateStats:
     manual_risk: int = 0
     # 写回失败的分块数（成功的块已经记账，见 WriteInterrupted）
     write_chunks_failed: int = 0
+    # 撞到单任务预算（stop 策略）而提前停下：必须让人看出"是钱花完了，不是翻译失败"
+    budget_stopped: bool = False
+    # 模型调用的**具体失败原因**（去重、最多留 5 条）。
+    # 以前这里只累加 failed 计数，原因被 `except LLMError: return [], [], len(batch)`
+    # 直接吞掉：任务日志只剩「处理 0 条」，用户完全看不出是网关 400、
+    # 是超时、还是模型名不存在 —— "看起来成功了但事实不是那样"。
+    errors: list[str] = field(default_factory=list)
+    # 演练模式下的"会写入多少条"。`written` 表示真的写进平台了多少，
+    # 演练时恒为 0：两者混用一个字段时，Agent/脚本读到 written>0 会以为已经落库。
+    would_write: int = 0
     # 平台术语同步结果 {"ok":bool,"reason":str,"count":int,"retired":int}；空 = 未同步
     terms_sync: dict = field(default_factory=dict)
     # 需要运维看见的告警（复查不可用、写回中断等），不静默
@@ -94,6 +131,9 @@ class TranslateStats:
             "skipped_manual": self.skipped_manual,
             "manual_risk": self.manual_risk,
             "write_chunks_failed": self.write_chunks_failed,
+            "budget_stopped": self.budget_stopped,
+            "would_write": self.would_write,
+            "errors": list(self.errors),
             "terms_sync": self.terms_sync,
             "warnings": list(self.warnings),
             "dry_run": self.dry_run,
@@ -123,11 +163,14 @@ class TranslatePipeline:
         store: "Store",
         llm: BaseLLM,
         system_prompt: str | None = None,
+        budget_check: Callable[[], None] | None = None,
     ):
         self.client = client
         self.cfg = cfg
         self.store = store
         self.llm = llm
+        # 任务内预算检查点：由 server 层注入（CLI 不注入 = 不检查，行为不变）
+        self.budget_check = budget_check
         # 自定义提示词；空串表示用模块内置默认值
         self.system_prompt = (system_prompt or "").strip() or SYSTEM_PROMPT
 
@@ -240,13 +283,34 @@ class TranslatePipeline:
         limit: int | None = None,
         max_items: int = DEFAULT_MAX_ITEMS,
         stats: "TranslateStats | None" = None,
+        ids: Sequence[int] | None = None,
     ) -> list[StringItem]:
         """采集本轮要翻的词条。
 
         取到的条数顶到 `max_items` 就把 `stats.truncated` 置位并留下告警：
         `iter_strings` 到上限只是安静地停下，不记这一笔的话报表会声称
         整个项目「已经全处理完了」（真实项目 2 万条以上就会撞上）。
+
+        `ids` 是「人工点名要重翻的条目」：给了就**只**翻这些，不看阶段、不看
+        文件白名单、也不套 min_length —— 人已经明确指了这几条，软件再自作主张
+        过滤掉就是在违背指令。代价是每条一次 GET（平台没有按 id 批量读的接口）。
         """
+        if ids:
+            picked: list[StringItem] = []
+            missing = 0
+            for sid in list(ids)[:max_items]:
+                try:
+                    s = self.client.get_string(int(sid))
+                except Exception:  # noqa: BLE001 - 单条读不到不该整轮失败
+                    missing += 1
+                    continue
+                picked.append(s)
+                if limit and len(picked) >= limit:
+                    break
+            if stats is not None and missing:
+                stats.warnings.append(f"点名重翻的 {missing} 条在平台上读不到（可能已删除），已跳过")
+            return picked
+
         files = self.cfg.translate.files
         file_ids: list[int] | None = None
         if files:
@@ -296,6 +360,8 @@ class TranslatePipeline:
                 s.original,
                 top_k=self.cfg.translate.tm_top_k,
                 min_score=self.cfg.translate.tm_min_score,
+                # 只在「本项目 + 通用池」里找：跨项目的机翻串味会直接写进平台
+                project=self.client.project_id,
             ):
                 if hit.source in seen:
                     continue
@@ -337,46 +403,99 @@ class TranslatePipeline:
         return out
 
     def _translate_batch(
-        self, batch: list[StringItem], *, terms: dict[str, dict]
-    ) -> tuple[list[dict], list[dict], int]:
-        """单批翻译。返回 (待写入, 被拦样例, 失败条数)。
+        self, batch: list[StringItem], *, terms: dict[str, dict], on_item=None,
+        budget_check=None,
+    ) -> tuple[list[dict], list[dict], int, str]:
+        """单批翻译。返回 (待写入, 被拦样例, 失败条数, 失败原因)。
 
         刻意不在这里改 stats —— 线程池并发时共享累加会丢计数，
-        统计由主线程按返回值合并。
+        统计由主线程按返回值合并；失败原因同样按返回值回到主线程，
+        这样 `except` 里吞掉的信息还能被报表拿到。
+
+        `budget_check` 在**每批模型调用前**执行：以前预算只在任务开始时查一次，
+        一次翻几千条的长任务中途超支没人管，跑完才在报表里看到花了多少。
         """
+        if on_item is not None:
+            on_item(
+                [
+                    {"id": s.id, "original": s.original, "translation": "", "status": "running"}
+                    for s in batch
+                ]
+            )
+        if budget_check is not None:
+            try:
+                budget_check()
+            except BudgetExceeded as exc:
+                return [], [], len(batch), f"BudgetExceeded: {exc}"
         try:
-            raw = self.llm.chat(self._build_messages(batch, terms=terms), json_mode=True)
+            raw = self.llm.chat(
+                self._build_messages(batch, terms=terms),
+                json_mode=True,
+                json_schema=TRANSLATE_SCHEMA,
+            )
             mapping = self._parse(raw)
         except LLMNotConfigured:
             raise  # 配置错误必须冒泡，不能当成"这批失败了"
-        except LLMError:
-            return [], [], len(batch)
+        except LLMError as exc:
+            # 整批失败也要给这批每一条一个终态：否则界面会永远停在"处理中"，
+            # 任务已经 failed 了，人还看着一堆在飞的行 —— 这也是假象。
+            if on_item is not None:
+                on_item(
+                    [
+                        {
+                            "id": s.id,
+                            "original": s.original,
+                            "translation": "",
+                            "status": "failed",
+                            "reason": f"{type(exc).__name__}: {str(exc)[:120]}",
+                        }
+                        for s in batch
+                    ]
+                )
+            return [], [], len(batch), f"{type(exc).__name__}: {exc}"
 
         writes: list[dict] = []
         blocked: list[dict] = []
         failed = 0
+        # 逐条上报给界面用的事件（ok / blocked / failed）。写回是否成功在
+        # `_write_chunks` 里另有一轮 status 更新，这里只说"模型产出了什么"。
+        final: list[dict] = []
         for s in batch:
             tr = mapping.get(s.id)
             if tr is None:
                 failed += 1
+                final.append(
+                    {"id": s.id, "original": s.original, "translation": "",
+                     "status": "failed", "reason": "模型没有返回这一条"}
+                )
                 continue
             # 硬拦：占位符/控制符不一致，或空译文 —— 不写回
             hard = check_placeholders(s.original, tr)
             if hard or not tr.strip():
+                reason = "; ".join(i.message for i in hard) or "空译文"
                 if len(blocked) < 20:
                     blocked.append(
                         {
                             "id": s.id,
                             "original": s.original,
                             "translation": tr,
-                            "reason": "; ".join(i.message for i in hard) or "空译文",
+                            "reason": reason,
                         }
                     )
                 else:
                     blocked.append({"id": s.id, "reason": "…"})
+                final.append(
+                    {"id": s.id, "original": s.original, "translation": tr,
+                     "status": "blocked", "reason": reason}
+                )
                 continue
             writes.append({"id": s.id, "translation": tr, "stage": int(Stage.TRANSLATED)})
-        return writes, blocked, failed
+            final.append(
+                {"id": s.id, "original": s.original, "translation": tr, "status": "ok"}
+            )
+        if on_item is not None:
+            on_item(final)
+        return writes, blocked, failed, ""
 
     # ------------------------------------------------------------------ 写回
     def _files_for(self, writes: list[dict], by_id: dict[int, StringItem]) -> list[int] | None:
@@ -479,6 +598,15 @@ class TranslatePipeline:
                     f"整块按未写入处理（下一轮重试）"
                 )
                 continue
+            if len(ids) < len(part):
+                # 平台只确认了一部分：差额既不在 written 也不在 failed 里就会
+                # 「凭空消失」（提交 40、写入 37、失败 0）。按未写入记账并留痕。
+                missing_n = len(part) - len(ids)
+                stats.failed += missing_n
+                stats.warnings.append(
+                    f"写回结果不完整：本块提交 {len(part)} 条，平台只确认 {len(ids)} 条，"
+                    f"{missing_n} 条按未写入处理（下一轮重试）"
+                )
             targets_of = {w["id"]: w["translation"] for w in part}
             self.store.tm_add_many(
                 [
@@ -490,7 +618,9 @@ class TranslatePipeline:
                 origin="mt",
             )
             for i in ids:
-                self.store.ledger_mark(self.name, str(i), "write", "mt")
+                self.store.ledger_mark(
+                    self.name, str(i), "write", "mt", project=self.client.project_id
+                )
             self.store.ledger_commit()
             stats.written += len(ids)
 
@@ -501,14 +631,39 @@ class TranslatePipeline:
         dry_run: bool = False,
         sync_terms: bool = True,
         max_items: int = DEFAULT_MAX_ITEMS,
+        on_items: Callable[[list[dict]], None] | None = None,
+        budget_check: Callable[[], None] | None = None,
+        ids: Sequence[int] | None = None,
     ) -> TranslateStats:
+        """跑一轮翻译。
+
+        `on_items` 是逐条回调（WebUI 的"正在处理的词条"面板靠它）：
+        每批开始时推一次 `status="running"`，出结果后推一次终态
+        （ok / blocked / failed），写回后再推一次写成 `written`。
+        它只做展示，不参与任何判定 —— 失败与否看 stats。
+        """
+        budget_check = budget_check or self.budget_check
         stats = TranslateStats(dry_run=dry_run)
+        # 逐条事件要带上"这是演练"：演练模式下模型确实产出了译文，但**平台没变**，
+        # 界面上如果把预览当结果写进列表，用户会以为已经落库。
+        if on_items is not None and dry_run:
+            _sink = on_items
+            on_items = lambda rows: _sink([{**r, "dry_run": True} for r in rows])  # noqa: E731
         if sync_terms:
             # 术语同步失败不该让翻译整轮不动：结果记进 stats，谁看报表谁发现。
             stats.terms_sync = self.sync_terms_from_platform(raise_on_error=False)
 
-        targets = self._collect(limit=limit, max_items=max_items, stats=stats)
+        targets = self._collect(limit=limit, max_items=max_items, stats=stats, ids=ids)
         stats.fetched = len(targets)
+        if ids:
+            # 点名的条目是"我就是要重翻"，不是"帮我找没翻的"：
+            # 人工译文保护（force_overwrite=false）在这里拦下来等于违抗指令，
+            # 所以跳过它，但把"覆盖了 N 条已有译文"写进报表。
+            replaced = sum(1 for s in targets if (s.translation or "").strip())
+            if replaced:
+                stats.warnings.append(
+                    f"按点名重翻：其中 {replaced} 条平台上已有译文，本轮会覆盖它们"
+                )
         if not targets:
             return stats
 
@@ -517,17 +672,30 @@ class TranslatePipeline:
         terms = self.store.term_all()
         todo: list[StringItem] = []
         writes: list[dict] = []
+        tm_items: list[dict] = []
 
         # 1) TM 精确命中直出（省一次模型调用）
+        #    **点名重翻时禁用**：用户指了这几条要重翻，TM 里存的正是上一轮的机翻，
+        #    直出等于"0 次模型调用把旧译文原样写回"，功能看起来跑了、其实没翻
+        #    （审计实测：ids 重翻时 tm_hit=2、模型调用=0）。
         for s in targets:
-            exact = self.store.tm_exact(s.original)
+            exact = None if ids else self.store.tm_exact(
+                s.original, project=self.client.project_id
+            )
             if exact:
                 report = run_qa(s.original, exact, terms=terms, block_on=Severity.ERROR)
                 if report.ok:
                     writes.append({"id": s.id, "translation": exact, "stage": int(Stage.TRANSLATED)})
                     stats.tm_hit += 1
+                    tm_items.append(
+                        {"id": s.id, "original": s.original, "translation": exact,
+                         "status": "tm", "reason": "本地记忆命中"}
+                    )
                     continue
             todo.append(s)
+        if on_items is not None and tm_items:
+            for i in range(0, len(tm_items), ITEM_EVENT_CHUNK):
+                on_items(tm_items[i : i + ITEM_EVENT_CHUNK])
 
         # 2) 其余走模型
         size = max(1, self.cfg.translate.batch_size)
@@ -535,7 +703,8 @@ class TranslatePipeline:
         stats.llm_batches = len(batches)
         results = self.llm.map_concurrent(
             batches,
-            partial(self._translate_batch, terms=terms),
+            partial(self._translate_batch, terms=terms, on_item=on_items,
+                    budget_check=budget_check),
             concurrency=self.cfg.llm.concurrency,
         )
         for batch, res in zip(batches, results, strict=True):
@@ -545,26 +714,71 @@ class TranslatePipeline:
                 raise res
             if isinstance(res, Exception):
                 stats.failed += len(batch)
+                self._note_error(stats, f"{type(res).__name__}: {res}")
+                if on_items is not None:
+                    on_items(
+                        [
+                            {"id": s.id, "original": s.original, "translation": "",
+                             "status": "failed", "reason": f"{type(res).__name__}: {str(res)[:120]}"}
+                            for s in batch
+                        ]
+                    )
                 continue
             if isinstance(res, tuple):
-                w, blocked, failed = res
+                w, blocked, failed, err = res
+                if err.startswith("BudgetExceeded"):
+                    # 预算拦下的批次不算"模型失败"：单独记，并只提示一次
+                    stats.budget_stopped = True
+                    if err not in stats.errors and len(stats.errors) < 5:
+                        stats.errors.append(err)
+                    continue
                 writes.extend(w)
                 stats.blocked += len(blocked)
                 stats.blocked_samples.extend(b for b in blocked if "original" in b)
                 stats.failed += failed
+                if err:
+                    self._note_error(stats, err)
         # writes 里前段是 TM 命中，后段才是 LLM 产出；直接取 len 会双计
         stats.llm_ok = max(0, len(writes) - stats.tm_hit)
 
+        # 网关协商结果（如"不支持 json_object 已改用 …"）必须进报表
+        for note in getattr(self.llm, "json_warnings", []) or []:
+            if note not in stats.warnings:
+                stats.warnings.append(note)
+
         # 3) 写回（人工译文保护 + 分块提交，块成功即记账）
-        if dry_run or not writes:
-            stats.written = len(writes)  # dry-run 时报"将写入多少"
-        else:
+        if dry_run:
+            # 演练：`written` 恒为 0（没落平台就是没写），预估值单独给 `would_write`。
+            # 共用一个字段会让 Agent/脚本把"将写入 200 条"当成"已经写进去 200 条"。
+            stats.would_write = len(writes)
+            if writes:
+                stats.warnings.append(
+                    "演练模式：would_write 是预估值（未做写前人工译文复查），written 恒为 0"
+                )
+        elif writes:
             by_id = {s.id: s for s in targets}
             # force_overwrite 以前是死配置：默认 false 却从不读取，MT 译文会直接
             # 盖掉取材之后别人译好的条目。默认走复查，显式 true 才不做。
-            if not bool(getattr(self.cfg.translate, "force_overwrite", False)):
+            # 点名重翻（ids）等同"用户已明确要覆盖"，也不再走人工译文复查。
+            if not (bool(getattr(self.cfg.translate, "force_overwrite", False)) or ids):
                 writes = self._protect_manual(writes, by_id, stats)
             if writes:
                 self._write_chunks(writes, by_id, stats)
+                if on_items is not None:
+                    # 分片推送：一次塞进几千条会让 SSE 事件体积失控，
+                    # 界面一次也只显示一屏（分片后能边收边刷）
+                    rows = [
+                        {"id": w["id"], "translation": w["translation"], "status": "written"}
+                        for w in writes
+                        if w["id"] in by_id
+                    ]
+                    for i in range(0, len(rows), ITEM_EVENT_CHUNK):
+                        on_items(rows[i : i + ITEM_EVENT_CHUNK])
 
         return stats
+
+    @staticmethod
+    def _note_error(stats: TranslateStats, message: str) -> None:
+        """记下"为什么这批失败了"，去重且最多 5 条（同一网关故障会重复 N 次）。"""
+        if message and message not in stats.errors and len(stats.errors) < 5:
+            stats.errors.append(message)
