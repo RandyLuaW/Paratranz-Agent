@@ -401,7 +401,7 @@ def tool_status(ctx: AppContext, *, job=None, runner=None, **_: Any) -> dict:
     tasks: list = []
     tasks_error = ""
     try:
-        tasks = ctx.client.list_tasks(page=1, page_size=20)
+        tasks = ctx.client.list_tasks(page=1, page_size=100)
     except Exception as exc:  # noqa: BLE001 - 任务功能可能未开启
         # 项目没开 task 功能时这里是正常的空；但其它失败（网络/权限）也会走到
         # 这里。把它吞掉就等于报表里写「平台任务 0 个」—— 用户会以为真的没有。
@@ -434,14 +434,44 @@ def tool_status(ctx: AppContext, *, job=None, runner=None, **_: Any) -> dict:
         },
         "dirs": _dir_rollup(files),
         "tasks": [
-            {"id": t.id, "title": t.title, "status": t.status, "files": len(t.taskFiles)}
+            {
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "files": len(t.taskFiles),
+                # 任务里"还剩多少条没翻"：平台把任务一直挂在 status=0（未结项），
+                # 只看 status 会把"早已译完的空任务"也算成进行中
+                # （实测 8 个 status=0 的任务里，有 1 个的待翻译是 0）。
+                "pending": sum(
+                    max(0, (tf.total or 0) - (tf.translated or 0)) for tf in (t.taskFiles or [])
+                ),
+            }
             for t in tasks
         ],
+        "task_summary": _task_summary(tasks),
         "terms": terms,
         "local_tm": ctx.store.tm_size(),
         # 读不到就说读不到：0 和「没读出来」必须能区分
         "tasks_error": tasks_error,
         "terms_error": terms_error,
+    }
+
+
+def _task_summary(tasks: list) -> dict:
+    """任务口径：未结项 / 其中还有待翻译 / 待翻译总条数。
+
+    为什么不能只报 status=0 的个数：用户看到「8 个进行中」会以为有 8 个任务正在被处理。
+    真实情况往往是历史任务一直没结项，其中一部分已经没有任何待翻译词条。
+    """
+    open_tasks = [t for t in tasks if t.status == 0]
+    pending = {
+        t.id: sum(max(0, (tf.total or 0) - (tf.translated or 0)) for tf in (t.taskFiles or []))
+        for t in open_tasks
+    }
+    return {
+        "open": len(open_tasks),
+        "with_pending": sum(1 for v in pending.values() if v > 0),
+        "pending_strings": sum(pending.values()),
     }
 
 

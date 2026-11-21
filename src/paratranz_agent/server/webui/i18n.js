@@ -110,6 +110,13 @@ const LANG_RULES = [
   [/^共 (\d+) 条 · 本页匹配 (\d+)$/, '$1 strings · $2 matching on this page'],
   [/^(\d+) \/ (\d+)$/, '$1 / $2'],
   [/^已选 (\d+) 条$/, '$1 selected'],
+  // 概览页的任务口径（未结项 ≠ 正在处理）
+  [/^平台任务 (\d+) 个未结项 · (\d+) 个还有待翻译（(\d+) 条）$/,
+    '$1 open tasks · $2 with untranslated strings ($3)'],
+  [/^平台任务 (\d+) 个未结项 · 均无待翻译词条$/, '$1 open tasks · none has untranslated strings'],
+  [/^平台任务 (\d+) 个未结项$/, '$1 open tasks'],
+  [/^平台任务 0 个$/, 'No platform tasks'],
+  [/^数据更新于 (.+)$/, 'Updated $1'],
   [/^已提交 (\d+) 条，平台确认 (\d+) 条$/, 'Submitted $1, platform confirmed $2'],
   // 实时面板的计数行：`处理中 3 · 已产出 40 · 已写入 40`
   [/^((?:处理中|已产出|记忆命中|被拦|失败|已写入|未回结果) \d+(?: · (?:处理中|已产出|记忆命中|被拦|失败|已写入|未回结果) \d+)*)$/,

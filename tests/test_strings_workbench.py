@@ -579,3 +579,37 @@ def test_detail_exposes_both_record_sources(web):
     row = _first_string(web)
     d = web.get(f"/api/strings/{row['id']}").json()
     assert "history" in d and "local_history" in d
+
+
+# ------------------------------------------------- 概览数字必须是事实
+def test_task_summary_counts_only_tasks_with_pending():
+    """「平台任务 N 个进行中」不能说谎。
+
+    实测（2026-11-22，项目 4780）：8 个任务全是 status=0（未结项），但其中一个
+    「衣服」已经 0 条待翻译 —— 只按 status 计数会让用户以为有 8 个任务正在被处理。
+    """
+    from types import SimpleNamespace as NS
+
+    from paratranz_agent.server.tools import _task_summary
+
+    def task(tid, pairs):
+        return NS(
+            id=tid,
+            status=0,
+            taskFiles=[NS(total=t, translated=tr) for t, tr in pairs],
+        )
+
+    tasks = [
+        task(1, [(100, 100)]),          # 已译完却没结项
+        task(2, [(200, 190), (50, 50)]),  # 还有 10 条
+        task(3, [(30, 0)]),             # 还有 30 条
+        NS(id=4, status=1, taskFiles=[NS(total=9, translated=0)]),  # 已完成任务不计入
+    ]
+    got = _task_summary(tasks)
+    assert got == {"open": 3, "with_pending": 2, "pending_strings": 40}
+
+
+def test_project_payload_exposes_task_summary(web):
+    d = web.get("/api/project").json()
+    assert "task_summary" in d
+    assert set(d["task_summary"]) == {"open", "with_pending", "pending_strings"}

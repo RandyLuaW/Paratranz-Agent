@@ -267,7 +267,10 @@ function connectSSE() {
       pushLog({ ts: data.ts, level: data.job.status === 'failed' ? 'error' : 'info',
                 msg: `任务 ${data.job.tool} → ${data.job.status}` });
       const st = data.job.status;
-      if (st && st !== 'running' && st !== 'queued') settleLive(st);
+      if (st && st !== 'running' && st !== 'queued') {
+        settleLive(st);
+        scheduleProjectRefresh();     // 写完了就让概览的「待翻译」跟上
+      }
       refreshJobs();
     } else if (data.type === 'item') {
       pushItems(data.job_id, data.items, data.ts);
@@ -348,7 +351,16 @@ function renderOverview(main) {
   const g = p.progress;
   const pending = Math.max(0, g.total - g.translated);
   const dirs = state.dirs || [];
-  const openTasks = (p.tasks || []).filter((t) => t.status === 0).length;
+  // 任务口径：平台把任务长期挂在 status=0（未结项），其中可能已经没有任何待翻译。
+  // 只报"进行中"会让用户以为有这么多任务正在被处理（实测 8 个里 1 个是 0 条待翻译）。
+  const ts = p.task_summary || { open: (p.tasks || []).filter((t) => t.status === 0).length,
+                                with_pending: 0, pending_strings: 0 };
+  // 文案不带「平台任务」前缀：页头自己加，右侧 kv 的标签已经有了
+  const taskText = ts.open
+    ? `${ts.open} 个未结项` + (ts.with_pending
+        ? ` · ${ts.with_pending} 个还有待翻译（${ts.pending_strings} 条）`
+        : ' · 均无待翻译词条')
+    : '0 个';
 
   main.innerHTML = `
     ${pageHead(
@@ -358,7 +370,8 @@ function renderOverview(main) {
        · 校对等级 ${p.project.review_mode}
        · ${p.tasks_error
           ? '<b style="color:var(--err)" title="' + esc(p.tasks_error) + '">平台任务读取失败</b>'
-          : `平台任务 ${openTasks} 个进行中`}`,
+          : `平台任务 ${esc(taskText)}`}${
+          state.projectAt ? ` · 数据更新于 ${fmtTime(state.projectAt / 1000)}` : ''}`,
       '<button class="btn" id="refreshProj">刷新</button>'
     )}
 
@@ -418,7 +431,7 @@ function renderOverview(main) {
           <div class="kv"><span class="k">模型 API</span>
             <span class="v" style="color:${state.llmReady ? 'var(--ok)' : 'var(--err)'}">
               ${state.llmReady ? '已配置' : '未配置'}</span></div>
-          <div class="kv"><span class="k">平台任务</span><span class="v">${openTasks} 个进行中</span></div>
+          <div class="kv"><span class="k">平台任务</span><span class="v">${esc(taskText)}</span></div>
           <div class="kv"><span class="k">本地 TM</span><span class="v">${p.local_tm} 条</span></div>
           <div class="kv"><span class="k">术语</span><span class="v">${p.terms} 条</span></div>
           <div class="kv"><span class="k">目录</span><span class="v">${dirs.length} 个</span></div>
@@ -1807,9 +1820,28 @@ async function testSettings() {
 }
 
 /* ------------------------------------------------------------------ 数据加载 */
+/* 自动刷新前先看用户是不是正在某个表单里打字：整页重绘会把输入框重建，
+   正在输入的 Agent 指令会凭空消失（宁可这次不刷，也不能吃用户的东西）。 */
+function canAutoRefresh() {
+  const el = document.activeElement;
+  if (!el || !el.closest || !el.closest('#main')) return true;
+  return !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+}
+
+let _projTimers = [];
+/* 任务结束后分两次拉项目统计：平台 stats 有 6~8 秒延迟，
+   立刻拉会拿到旧数字，用户就会觉得"写完了但待翻译没变"。 */
+function scheduleProjectRefresh() {
+  _projTimers.forEach(clearTimeout);
+  _projTimers = [4000, 13000].map((ms) => setTimeout(() => {
+    if (canAutoRefresh()) loadProject(state.view === 'overview');
+  }, ms));
+}
+
 async function loadProject(rerender = false) {
   try {
     state.project = await api('GET', '/api/project');
+    state.projectAt = Date.now();
     setConn(true, '已连接');
     // 项目名由 pageHead 渲染，顶栏只保留面包屑
     if (rerender || state.view === 'overview') render();
@@ -4473,9 +4505,15 @@ async function boot() {
     render();
   }
 
-  // 定时刷新（任务进度）
+  // 定时刷新：任务每 8 秒一次；项目统计另按 15 秒节流（一次要打 4 个平台接口）。
+  // 以前只刷任务，于是「已翻译 / 待翻译」从打开页面那一刻起就不再变了。
+  let lastProjPull = Date.now();
   setInterval(() => {
     if (state.view === 'overview' || state.view === 'jobs') refreshJobs();
+    if (state.view === 'overview' && Date.now() - lastProjPull > 15000 && canAutoRefresh()) {
+      lastProjPull = Date.now();
+      loadProject(false);
+    }
   }, 8000);
 }
 
