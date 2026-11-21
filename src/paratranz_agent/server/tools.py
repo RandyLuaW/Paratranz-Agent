@@ -147,6 +147,9 @@ class AppContext:
             self._llm_fps.clear()
             if self._store is None:
                 self._store = Store(self.state_dir / "agent.db")
+                # 让账本知道"这笔记录属于哪个任务"：worker 线程里 current_job 有值，
+                # 于是任务报表可以下钻到具体词条（谁写的、写了哪些）。
+                self._store.set_job_provider(lambda: current_job.get()[0])
             self._fingerprint = fp
 
     def _on_usage(self, ev: UsageEvent) -> None:

@@ -613,3 +613,51 @@ def test_project_payload_exposes_task_summary(web):
     d = web.get("/api/project").json()
     assert "task_summary" in d
     assert set(d["task_summary"]) == {"open", "with_pending", "pending_strings"}
+
+
+
+# ------------------------------------------------- 任务 → 词条的下钻
+def _seed_ledger(web, job_id: str, ids: list[str]) -> None:
+    """直接往账本塞记录：下钻功能测的是"账本→词条"这条链路，不需要真跑模型。"""
+    store = web.app.state.ctx.store
+    for sid in ids:
+        store.ledger_mark("translate", sid, "write", "mt", project=0, job=job_id)
+
+
+def test_job_strings_drilldown_returns_written_items(web):
+    """「本批写入 N 条」必须能点开看到是哪 N 条（真实痛点：报表说 192 条，却无从定位）。"""
+    rows = web.get("/api/strings", params={"page_size": 3}).json()["items"]
+    ids = [str(r["id"]) for r in rows]
+    _seed_ledger(web, "JOB_DRILL", ids)
+
+    d = web.get("/api/jobs/JOB_DRILL/strings").json()
+    assert d["source"] == "ledger"
+    assert d["count"] == len(ids)
+    assert {str(i["id"]) for i in d["items"]} == set(ids)
+    for key in ("id", "original", "translation", "stage"):
+        assert key in d["items"][0]
+
+
+def test_ledger_window_drilldown_for_old_jobs(web):
+    """老任务没有 job 列（v4 之前写的），要能按时间窗反查出来。"""
+    rows = web.get("/api/strings", params={"page_size": 2}).json()["items"]
+    _seed_ledger(web, "", [str(r["id"]) for r in rows])   # job 列为空 = 老记录
+
+    d = web.get("/api/ledger/strings", params={"hours": 1, "pipeline": "translate"}).json()
+    assert d["source"] == "ledger-window"
+    assert d["count"] >= 2
+
+
+def test_ledger_marks_carry_current_job(web):
+    """provider 接线：worker 线程里的 current_job 会被自动写进账本的 job 列。"""
+    from paratranz_agent.server.jobs import current_job
+
+    store = web.app.state.ctx.store
+    row = web.get("/api/strings", params={"page_size": 1}).json()["items"][0]
+    tok = current_job.set(("JOB_CTX", "translate"))
+    try:
+        store.ledger_mark("translate", str(row["id"]), "write", "mt", project=0)
+    finally:
+        current_job.reset(tok)
+    got = store.ledger_items_for_job("JOB_CTX")
+    assert [r["item_id"] for r in got] == [str(row["id"])]

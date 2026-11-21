@@ -31,7 +31,10 @@ const state = {
      `loadedKey` 记录"当前这批数据是哪个查询条件拉回来的"——用它判断要不要发请求，
      而不是拿 `items.length===0` 当"没加载过"：后者在"查无结果"时会无限重拉（自激）。 */
   str: { file: '', stage: '0', page: 1, size: 50, q: '', items: [], total: 0, pages: 0,
-         sel: null, detail: null, loading: false, loadedKey: '' },
+         sel: null, detail: null, loading: false, loadedKey: '',
+         // 非空 = 任务下钻模式：items 来自 /api/jobs/{id}/strings 或 /api/ledger/strings，
+         // 不再按页向服务端取数（筛查只看这 N 条）
+         jobId: '' },
   /* 「文件」页展开的文件与其词条列表。和 state.str 分开：两页各有自己的
      筛选与游标，混用会出现"在文件页翻页，词条页的页码也跟着变"。 */
   fileView: { fid: '', page: 1, size: 50, stage: '', q: '', items: [], total: 0, pages: 0,
@@ -535,6 +538,10 @@ function jobCard(j) {
       <span class="name">${esc(j.tool)}</span>
       <span class="meta">${esc(j.origin)} · ${fmtTime(j.created_at)} · ${dur}</span>
       <div class="spacer"></div>
+      ${j.result && (j.result.written || j.result.would_write)
+        ? `<button class="btn sm" data-jobstrings="${esc(j.id)}" style="margin-right:6px"
+             title="查看这个任务写入/判定过的具体词条">本批 ${j.result.written || j.result.would_write} 条</button>`
+        : ''}
       ${j.status === 'running' || j.status === 'queued'
         ? `<button class="btn danger" data-cancel="${esc(j.id)}" style="padding:3px 9px;font-size:12px">取消</button>`
         : ''}
@@ -552,8 +559,15 @@ function jobCard(j) {
 function bindJobCards(root) {
   root.querySelectorAll('.job').forEach((el) => {
     const id = el.dataset.job;
+    const drill = el.querySelector('[data-jobstrings]');
+    if (drill) {
+      drill.onclick = (ev) => {
+        ev.stopPropagation();
+        openJobStrings(drill.dataset.jobstrings);
+      };
+    }
     el.querySelector('.hd').onclick = async (ev) => {
-      if (ev.target.dataset.cancel) return;
+      if (ev.target.dataset.cancel || ev.target.dataset.jobstrings) return;
       if (state.openJobs.has(id)) {
         state.openJobs.delete(id);
         el.classList.remove('open');
@@ -586,10 +600,13 @@ function renderJobs(main) {
   const running = state.jobs.filter((j) => j.status === 'running' || j.status === 'queued').length;
   main.innerHTML = `
     ${pageHead('任务', `共 ${state.jobs.length} 个 · 运行中 ${running} 个 · 点标题展开日志`,
-      '<button class="btn" id="refreshJobs">刷新</button>')}
+      '<button class="btn" id="recentWrites" title="按本机账本列出最近 24 小时写入的词条">最近写入</button>'
+      + '<button class="btn" id="refreshJobs" style="margin-left:6px">刷新</button>')}
     <div id="liveHost">${livePanel()}</div>
     <div id="jobList">${state.jobs.length ? state.jobs.map(jobCard).join('') : '<div class="empty">还没有任务</div>'}</div>`;
   $('#refreshJobs').onclick = () => refreshJobs(true);
+  const recent = $('#recentWrites');
+  if (recent) recent.onclick = () => openLedgerStrings(24);
   bindJobCards($('#jobList'));
   bindLiveAndRows($('#liveHost'));
 }
@@ -1108,7 +1125,8 @@ async function renderStrings(main) {
   const s = state.str;
   // 判据用「这批数据是哪个查询条件拉回来的」，不能用 items.length===0。
   // 后者在"查无结果 / 请求失败"时会反复触发拉取（render 里又 render），变成自激循环。
-  if (s.loadedKey !== strQueryKey() && !s.loading) {
+  // 任务下钻模式：数据已经在 items 里（来自 /api/jobs/{id}/strings），不再按页取
+  if (!s.jobId && s.loadedKey !== strQueryKey() && !s.loading) {
     await loadStrings();
     if (ep !== renderEpoch) return;
   }
@@ -1123,8 +1141,14 @@ async function renderStrings(main) {
       `${s.total} 条 · 第 ${s.page} / ${s.pages || 1} 页 · 点任意行查看原文、上下文与处理记录`,
       '<button class="btn" id="stRefresh">刷新</button>')}
     <div id="liveHost">${livePanel()}</div>
+    ${s.jobId ? `<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>任务 <span class="mono">${esc(s.jobId)}</span> 的 ${s.total} 条</b>
+      <span class="dim" style="font-size:11.5px">这些是该任务写入/判定过的词条，可就地改、可批量操作</span>
+      <div class="spacer"></div>
+      <button class="btn sm" id="stExitJob">返回全部词条</button>
+    </div>` : ''}
     <div id="batchHost">${batchBarHtml()}</div>
-    <div class="card">
+    <div class="card"${s.jobId ? ' style="display:none"' : ''}>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <select class="field" id="stStage" style="width:132px">
           ${['0', '1', '2', '3', '5', '9', ''].map((v) => `<option value="${v}"${
@@ -1173,6 +1197,15 @@ async function renderStrings(main) {
                : '这个条件下没有词条。换阶段或文件再看')}</div>`}
     </div>`;
 
+  const exitJob = $('#stExitJob');
+  if (exitJob) {
+    exitJob.onclick = () => {
+      Object.assign(state.str, { jobId: '', items: [], loadedKey: '', page: 1, q: '', stage: '' });
+      closeDetail();
+      render();
+      loadStrings();
+    };
+  }
   $('#stRefresh').onclick = async () => {
     closeDetail();
     s.loadedKey = '';          // 强制重拉（否则 key 没变就不会再请求）
@@ -1467,6 +1500,54 @@ function findLoaded(id) {
   return (
     [...(state.str.items || []), ...(state.fileView.items || [])].find((r) => r.id === id) || null
   );
+}
+
+/* 从任务下钻：把这个任务写入/判定过的词条装进「词条」视图。
+ *
+ * 数据来源是本机账本的 job 列（持久、可按任务反查）；老任务没有这一列时
+ * 后端会用任务起止时间窗兜底。这样"报表说写了 192 条"就能变成"这 192 条在哪"。
+ */
+async function openJobStrings(jobId) {
+  try {
+    toast('正在读取这批词条…（每条约 0.15 秒，受平台速率限制）');
+    const d = await api('GET', '/api/jobs/' + encodeURIComponent(jobId) + '/strings');
+    const s = state.str;
+    Object.assign(s, {
+      jobId, items: d.items || [], total: d.count || 0, pages: 1, page: 1,
+      loadedKey: 'job:' + jobId, q: '', stage: '', detail: null, loading: false,
+    });
+    closeDetail();
+    state.batch.clear();
+    switchView('strings');
+    const src = d.source === 'ledger' ? '本机账本'
+      : (d.source === 'time-window' ? '任务时间窗' : '任务内存');
+    toast(`本批 ${d.count} 条（来源：${src}）${d.missing ? `，${d.missing} 条已不在平台上` : ''}`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* 按时间窗下钻：老任务没有 job 列、进程重启后任务也没了，只能从账本按时间反查。 */
+async function openLedgerStrings(hours = 24) {
+  try {
+    toast('正在读取这批词条…（每条约 0.15 秒，受平台速率限制）');
+    const d = await api('GET', `/api/ledger/strings?hours=${hours}&pipeline=translate`);
+    if (!d.count) {
+      toast(`最近 ${hours} 小时没有本机写入记录`, true);
+      return;
+    }
+    Object.assign(state.str, {
+      jobId: 'ledger:' + hours + 'h', items: d.items || [], total: d.count,
+      pages: 1, page: 1, loadedKey: 'ledger:' + hours, q: '', stage: '',
+      detail: null, loading: false,
+    });
+    closeDetail();
+    state.batch.clear();
+    switchView('strings');
+    toast(`最近 ${hours} 小时写入 ${d.count} 条${d.missing ? `，${d.missing} 条已不在平台上` : ''}`);
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 async function openString(id) {

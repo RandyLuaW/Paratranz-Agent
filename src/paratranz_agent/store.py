@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS ledger (
     detail TEXT NOT NULL DEFAULT '',
     ts REAL NOT NULL,
     project INTEGER NOT NULL DEFAULT 0,
+    job TEXT NOT NULL DEFAULT '',
     UNIQUE(pipeline, item_id, action, project)
 );
 
@@ -155,8 +156,20 @@ CREATE TABLE ledger (
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_project ON ledger(project, pipeline)")
 
 
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v4：账本加 `job` 列 —— 让「某个任务写了哪些词条」可下钻。
+
+    没有这一列时，用户只能看到任务报表写着「写入 192 条」，却无法定位到底是哪 192 条；
+    内存里的 `Job.items` 只留最近 300 条、进程重启即失。job 列补上这条纽带。
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(ledger)")}
+    if "job" not in cols:
+        conn.execute("ALTER TABLE ledger ADD COLUMN job TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_job ON ledger(job)")
+
+
 # 迁移步骤：下标 + 1 就是它升到的版本号，严格按顺序执行，只能往后追加。
-MIGRATIONS = (_migrate_to_v1, _migrate_to_v2, _migrate_to_v3)
+MIGRATIONS = (_migrate_to_v1, _migrate_to_v2, _migrate_to_v3, _migrate_to_v4)
 
 # 当前 schema 版本，记在库文件的 `PRAGMA user_version` 里（不用 meta 表：版本号
 # 必须在建表之前就读得到）。由迁移表长度推出，避免常数和步骤数各写一遍而走样。
@@ -235,6 +248,8 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # 由 server 层注入：返回当前正在执行的任务 id（None = CLI/无任务上下文）
+        self._job_provider: "callable | None" = None
         self.db = open_sqlite(self.path)
         with self._lock:
             self.db.executescript(SCHEMA)
@@ -461,7 +476,50 @@ class Store:
         with self._lock:
             self.db.commit()
 
+    def set_job_provider(self, provider) -> None:
+        """注入"当前任务 id"的取值器（server 用 `current_job` contextvar）。
+
+        放在 Store 里由外部注入，而不是让 store 去 import server —— core 不该反向依赖服务层。
+        """
+        self._job_provider = provider
+
     # ------------------------------------------------------------- Ledger
+    def ledger_items_for_job(self, job: str, *, project: int | None = None,
+                             actions: tuple[str, ...] = ("write", "edit", "pass", "dispute",
+                                                         "reset_empty", "publish", "create",
+                                                         "update")) -> list[dict]:
+        """某个任务写过的词条（按记录顺序）。用于「本批写入的 N 条」下钻。"""
+        if not job:
+            return []
+        sql = "SELECT item_id, action, ts FROM ledger WHERE job=?"
+        params: list[object] = [job]
+        if actions:
+            sql += " AND action IN (%s)" % ",".join("?" * len(actions))
+            params.extend(actions)
+        if project is not None:
+            sql += " AND project IN (0, ?)"
+            params.append(int(project))
+        sql += " ORDER BY ts, id"
+        with self._lock:
+            rows = self.db.execute(sql, params).fetchall()
+        return [{"item_id": r["item_id"], "action": r["action"], "ts": r["ts"]} for r in rows]
+
+    def ledger_items_between(self, start: float, end: float, *, pipeline: str = "",
+                             project: int | None = None) -> list[dict]:
+        """时间窗内的词条记录（老任务没有 job 列时用它兜底）。"""
+        sql = "SELECT item_id, action, ts FROM ledger WHERE ts BETWEEN ? AND ?"
+        params: list[object] = [float(start), float(end)]
+        if pipeline:
+            sql += " AND pipeline=?"
+            params.append(pipeline)
+        if project is not None:
+            sql += " AND project IN (0, ?)"
+            params.append(int(project))
+        sql += " ORDER BY ts, id"
+        with self._lock:
+            rows = self.db.execute(sql, params).fetchall()
+        return [{"item_id": r["item_id"], "action": r["action"], "ts": r["ts"]} for r in rows]
+
     def ledger_done(
         self, pipeline: str, item_id: str, action: str, *, project: int | None = None
     ) -> bool:
@@ -484,6 +542,7 @@ class Store:
         *,
         replace: bool = False,
         project: int = 0,
+        job: str = "",
     ) -> None:
         """记一笔。`replace=True` 时同一条目的同一动作会被**覆盖**（ts 也跟着更新）。
 
@@ -493,13 +552,23 @@ class Store:
 
         `project` 必须有：账本原先没有项目维度，`status` 的「已处理 N 条」是跨项目
         累计，换个项目看到的数字里混着上一个项目的记录。
+
+        `job` 由 `set_job_provider` 注入的取值器自动补齐（server 层把
+        `current_job` 接进来）—— 这样每条记录都能回答"是哪个任务写的"，
+        用户才能从任务报表下钻到具体词条。
         """
+        if not job and self._job_provider is not None:
+            try:
+                job = str(self._job_provider() or "")
+            except Exception:  # noqa: BLE001 - 取不到任务号不影响记账
+                job = ""
         verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
         with self._lock:
             self.db.execute(
-                f"{verb} INTO ledger(pipeline, item_id, action, detail, ts, project) "
-                "VALUES(?,?,?,?,?,?)",
-                (pipeline, str(item_id), action, detail[:500], time.time(), int(project)),
+                f"{verb} INTO ledger(pipeline, item_id, action, detail, ts, project, job) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (pipeline, str(item_id), action, detail[:500], time.time(),
+                 int(project), job[:32]),
             )
             # 同 term_upsert：自己提交，别把「写事务没提交」留给调用方决定
             self.db.commit()
