@@ -279,6 +279,38 @@ class StyleGuidePipeline:
         """标题归一：剥掉历史遗留的 `vYYYY-MM-DD` 尾巴，用于识别旧公告。"""
         return cls._TITLE_VERSION_SUFFIX.sub("", title).strip()
 
+    # 自动生成段落的围栏。有了它，「更新公告」才能只替换机器写的部分，
+    # 把人工在公告里补的说明原样留下（以前是整篇覆盖，人工编辑一发布就没了）。
+    _AUTO_BEGIN = "<!-- ptz:auto:begin（本段由 Paratranz Agent 自动生成，手改会被下次发布覆盖） -->"
+    _AUTO_END = "<!-- ptz:auto:end -->"
+
+    @classmethod
+    def _wrap_auto(cls, md: str) -> str:
+        return f"{cls._AUTO_BEGIN}\n{md.rstrip()}\n{cls._AUTO_END}"
+
+    @classmethod
+    def _merge_content(cls, old: str, md: str, *, replace_all: bool = False) -> tuple[str, str]:
+        """把新生成的正文合进已有公告。返回 (合并后正文, 处理说明)。
+
+        四种情况：
+        - `replace_all`（旧版带日期标题，说明这条**本来就是自动发的**）：整篇替换，
+          否则每次发版都会把旧生成的正文越堆越长；
+        - 已有正文带围栏：只替换围栏内那段，围栏外（人工补充）原样保留；
+        - 已有正文没有围栏但有内容：那是人工写的 —— **默认不覆盖**，追加到末尾；
+        - 已有正文为空：直接用新的。
+        """
+        old = old or ""
+        if not old.strip():
+            return cls._wrap_auto(md), "empty"
+        if replace_all:
+            return cls._wrap_auto(md), "replaced_legacy"
+        start = old.find(cls._AUTO_BEGIN)
+        end = old.find(cls._AUTO_END)
+        if start != -1 and end > start:
+            merged = old[:start] + cls._wrap_auto(md) + old[end + len(cls._AUTO_END) :]
+            return merged, "replaced_block"
+        return f"{old.rstrip()}\n\n{cls._wrap_auto(md)}", "appended"
+
     def publish(
         self,
         markdown: str | None = None,
@@ -299,7 +331,7 @@ class StyleGuidePipeline:
         # 公告。公告是给全组人看的，重复比失败难收拾得多（审计报告5 3.1 的根因）。
         existing = None
         try:
-            for ann in self.client.list_announcements(page=1, page_size=50):
+            for ann in self.client.iter_announcements(page_size=50):
                 if self._title_identity(ann.title) == identity:
                     existing = ann
                     break
@@ -311,31 +343,47 @@ class StyleGuidePipeline:
                 "请稍后重试。"
             ) from exc
 
+        # 合并前先读旧正文：不读就等于每次发布都把人手写的部分抹掉。
+        merged, how = self._wrap_auto(md), "empty"
+        if existing is not None:
+            old_content = getattr(existing, "content", "") or ""
+            # 标题自带 ` vYYYY-MM-DD` 尾巴 = 旧版自动发布器发的，整篇替换；
+            # 标题已经与固定标题一致又没围栏，才可能有人工内容，只追加不覆盖。
+            legacy_auto = existing.title.strip() != identity
+            merged, how = self._merge_content(old_content, md, replace_all=legacy_auto)
+
         if dry_run:
             return {"title": title, "action": "update" if existing else "create", "dry_run": True,
-                    "length": len(md),
+                    "length": len(merged), "merge": how,
                     "samples_error": getattr(self, "_samples_error", "")}
 
         if existing:
-            payload: dict = {"content": md, "bumped": cfg.bumped}
+            payload: dict = {"content": merged, "bumped": cfg.bumped}
             if existing.title != title:  # 顺手把旧的带日期标题归一
                 payload["title"] = title
             self.client.update_announcement(existing.id, payload)
-            self.store.ledger_mark(self.name, str(existing.id), "update", title)
+            self.store.ledger_mark(
+                self.name, str(existing.id), "update", title, project=self.client.project_id
+            )
             action, ann_id = "update", existing.id
         else:
             ann = self.client.create_announcement(
                 title=title,
-                content=md,
+                content=merged,
                 category=cfg.category,
                 internal=cfg.internal,
                 bumped=cfg.bumped,
             )
-            self.store.ledger_mark(self.name, str(ann.id), "create", title)
+            self.store.ledger_mark(
+                self.name, str(ann.id), "create", title, project=self.client.project_id
+            )
             action, ann_id = "create", ann.id
         self.store.ledger_commit()
         return {
-            "title": title, "action": action, "id": ann_id, "dry_run": False, "length": len(md),
+            "title": title, "action": action, "id": ann_id, "dry_run": False,
+            "length": len(merged),
+            # merge 说明本次怎么处理了旧正文：empty / replaced_block / appended
+            "merge": how,
             # 非空表示「风格样例没取到」，规范正文里那一段会是空的
             "samples_error": getattr(self, "_samples_error", ""),
         }
