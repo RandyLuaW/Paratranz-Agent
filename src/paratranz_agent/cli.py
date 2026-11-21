@@ -335,7 +335,8 @@ def status(
 
     tasks: list = []
     try:
-        tasks = ctx.client.list_tasks(page=1, page_size=100)
+        # 跨页取全：`page_size=100` 单页长度当「任务总数」在任务多的项目上会说谎
+        tasks = list(ctx.client.iter_tasks(page_size=100))
     except ParaTranzError:
         pass
 
@@ -359,7 +360,7 @@ def status(
         "terms": terms,
         "local_tm": ctx.store.tm_size(),
         "ledger": {
-            p: ctx.store.ledger_stats(p)
+            p: ctx.store.ledger_stats(p, project=ctx.client.project_id)
             for p in ("plan", "translate", "review", "glossary", "styleguide")
         },
     }
@@ -395,9 +396,7 @@ def plan(
     pipe = PlanPipeline(ctx.client, ctx.cfg, ctx.store)
     planned = pipe.build_plan()
 
-    if as_json:
-        _emit({"planned": [p.summary() for p in planned], "created": 0, "dry_run": dry_run}, True)
-    else:
+    if not as_json:
         if not planned:
             console.print("[green]没有待分派的内容[/green]（所有文件都已翻译）")
         else:
@@ -414,13 +413,23 @@ def plan(
     try:
         created = pipe.execute(planned, dry_run=dry_run)
     except RuntimeError as exc:  # 项目未开启任务功能
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
-    if not as_json:
-        if dry_run:
-            console.print("[yellow]dry-run：未创建任务[/yellow]，加 --yes 执行")
-        else:
-            console.print(f"[green]已创建 {len(created)} 个任务[/green]")
+    if as_json:
+        # `created` 必须在 execute 之后报：以前写死 0 且在 execute 之前 emit，
+        # 真建了 N 个任务也报 0 —— 编排层会据此重复调用，平台上就多出一整套重复任务。
+        _emit(
+            {
+                "planned": [p.summary() for p in planned],
+                "created": len(created),
+                "dry_run": dry_run,
+            },
+            True,
+        )
+    elif dry_run:
+        console.print("[yellow]dry-run：未创建任务[/yellow]，加 --yes 执行")
+    else:
+        console.print(f"[green]已创建 {len(created)} 个任务[/green]")
     ctx.close()
 
 
@@ -526,7 +535,9 @@ def glossary(
     if out:
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         Path(out).write_text(md, encoding="utf-8")
-        console.print(f"[green]候选表已写入[/green] {out}")
+        # --json 时 stdout 必须是纯 JSON：这行提示改走 stderr
+        if not as_json:
+            err_console.print(f"[green]候选表已写入[/green] {out}")
 
     result = pipe.publish(candidates, dry_run=dry_run, overwrite=overwrite)
     if as_json:
@@ -557,7 +568,9 @@ def styleguide(
     if out:
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         Path(out).write_text(md, encoding="utf-8")
-        console.print(f"[green]规范已写入[/green] {out}")
+        # --json 时 stdout 必须是纯 JSON：这行提示改走 stderr
+        if not as_json:
+            err_console.print(f"[green]规范已写入[/green] {out}")
 
     result = pipe.publish(md, dry_run=dry_run)
     if as_json:
@@ -624,7 +637,8 @@ def writeback(
         t.add_column("指标")
         t.add_column("值", justify="right")
         for k in (
-            "min_stage", "mode", "entries", "pulled", "skipped_stage", "skipped_empty",
+            "min_stage", "mode", "entries", "pulled", "skipped_stage",
+            "skipped_disputed", "skipped_empty",
             "skipped_no_original", "skipped_untracked", "files", "copied", "written",
             "mismatched", "missing", "unsupported", "failed_files",
         ):

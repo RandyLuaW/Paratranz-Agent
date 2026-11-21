@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..config import AgentConfig
+from ..filematch import matches_any
 from ..models import FileItem, Stage, Task
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -116,9 +117,12 @@ class PlanPipeline:
     # ------------------------------------------------------------------ 规划
     def _target_files(self) -> list[FileItem]:
         files = self.client.list_files()
-        allow = set(self.cfg.translate.files or [])
+        allow = list(self.cfg.translate.files or [])
         if allow:
-            files = [f for f in files if any(a in f.name for a in allow)]
+            # 与 translate._collect 用同一个 `matches_any`（精确相等或位于其下）。
+            # 这里原来是子串匹配：`files: ["a"]` 会命中一切含 a 的文件，
+            # 于是「分派出去的任务范围」≠「translate 实际能翻的范围」。
+            files = [f for f in files if matches_any(f.name, allow)]
         return [f for f in files if f.pending > 0]
 
     def build_plan(self) -> list[PlannedTask]:
@@ -318,7 +322,10 @@ class PlanPipeline:
                 except Exception:  # noqa: BLE001 - 置顶失败不影响任务本体
                     pass
 
-            self.store.ledger_mark(self.name, str(task.id), "create", item.title)
+            self.store.ledger_mark(
+                self.name, str(task.id), "create", item.title,
+                project=self.client.project_id,
+            )
             self.store.ledger_commit()
             created.append(task)
 

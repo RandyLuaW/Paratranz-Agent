@@ -490,7 +490,10 @@ class GlossaryPipeline:
                 variants=p.get("variants") or (),
                 source="agent",
             )
-            self.store.ledger_mark(self.name, p["term"], "publish", p["translation"])
+            self.store.ledger_mark(
+                self.name, p["term"], "publish", p["translation"],
+                project=self.client.project_id,
+            )
         self.store.term_commit()
         self.store.ledger_commit()
         return {

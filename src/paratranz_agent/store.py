@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS ledger (
     action TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT '',
     ts REAL NOT NULL,
-    UNIQUE(pipeline, item_id, action)
+    project INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(pipeline, item_id, action, project)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -97,8 +98,65 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """v2：账本加 `project` 列。
+
+    `ledger` 原先没有项目维度，`status` 里的「已处理 N 条」是**跨项目累计**：
+    换一个项目看到的数字里混着上一个项目的记录，而词条 id 虽然全局唯一，
+    "这个项目处理了多少"却是统计上必须回答的问题。
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(ledger)")}
+    if "project" not in cols:
+        conn.execute("ALTER TABLE ledger ADD COLUMN project INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_project ON ledger(project, pipeline)")
+
+
+def _ledger_unique_columns(conn: sqlite3.Connection) -> list[list[str]]:
+    """账本上所有唯一索引的列名（用于判断唯一键是否已包含 project）。"""
+    out: list[list[str]] = []
+    for idx in conn.execute("PRAGMA index_list(ledger)").fetchall():
+        if not idx[2]:        # idx[2] = unique 标志
+            continue
+        cols = [r[2] for r in conn.execute(f"PRAGMA index_info({idx[1]})").fetchall()]
+        out.append(list(cols))
+    return out
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v3：账本唯一键补上 `project`。
+
+    公告 id、任务 id 这类对象都是**每个项目各自编号**的，
+    `UNIQUE(pipeline, item_id, action)` 不含项目时，项目 B 的记录会被
+    `INSERT OR IGNORE` 静默丢弃；`replace=True` 更糟——直接把项目 A 的记录抹掉。
+    """
+    merged = ["pipeline", "item_id", "action", "project"]
+    if merged in _ledger_unique_columns(conn):
+        return
+    conn.execute("ALTER TABLE ledger RENAME TO ledger_old")
+    conn.execute(
+        """
+CREATE TABLE ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL,
+    project INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(pipeline, item_id, action, project)
+);
+"""
+    )
+    conn.execute(
+        "INSERT INTO ledger(id, pipeline, item_id, action, detail, ts, project) "
+        "SELECT id, pipeline, item_id, action, detail, ts, project FROM ledger_old"
+    )
+    conn.execute("DROP TABLE ledger_old")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_project ON ledger(project, pipeline)")
+
+
 # 迁移步骤：下标 + 1 就是它升到的版本号，严格按顺序执行，只能往后追加。
-MIGRATIONS = (_migrate_to_v1,)
+MIGRATIONS = (_migrate_to_v1, _migrate_to_v2, _migrate_to_v3)
 
 # 当前 schema 版本，记在库文件的 `PRAGMA user_version` 里（不用 meta 表：版本号
 # 必须在建表之前就读得到）。由迁移表长度推出，避免常数和步骤数各写一遍而走样。
@@ -151,7 +209,23 @@ def open_sqlite(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    # `PRAGMA journal_mode = WAL` 在**并发首次建库**时会立刻抛
+    # `database is locked`（实测 0.001s，`busy_timeout` 对它不生效）——
+    # WebUI 与 CLI 同时首次启动就有一个直接失败。所以：先读，已是 wal 就不动；
+    # 需要切换时短暂重试几次，仍失败就保持原模式（连接照样可用，只是没有 WAL）。
+    try:
+        mode = (conn.execute("PRAGMA journal_mode").fetchone() or [""])[0]
+        if str(mode).lower() != "wal":
+            for attempt in range(5):
+                try:
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 4:
+                        break
+                    time.sleep(0.05 * (attempt + 1))
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
@@ -181,9 +255,21 @@ class Store:
                 f"请升级 paratranz-agent 后重试"
             )
         for target in range(version, len(MIGRATIONS)):
-            MIGRATIONS[target](self.db)
-            # PRAGMA 不支持参数绑定；这里的值来自 range，不是外部输入
-            self.db.execute(f"PRAGMA user_version = {target + 1}")
+            # 迁移必须**整体成功或整体回退**：`BEGIN IMMEDIATE` 先拿写锁，
+            # 多进程同时启动时后来者等锁（busy_timeout 30s）而不是并行改表；
+            # `ALTER TABLE` 是 DDL，在 sqlite3 里会隐式开事务，显式 BEGIN 前
+            # 先确保没有悬挂事务，否则直接抛 "cannot start a transaction within a transaction"。
+            if self.db.in_transaction:  # pragma: no cover - 正常路径不会进
+                self.db.rollback()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                MIGRATIONS[target](self.db)
+                # PRAGMA 不支持参数绑定；这里的值来自 range，不是外部输入
+                self.db.execute(f"PRAGMA user_version = {target + 1}")
+            except Exception:
+                self.db.rollback()
+                raise
+            self.db.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -240,28 +326,40 @@ class Store:
             self.db.commit()
         return len(payload)
 
-    def tm_exact(self, source: str) -> str | None:
+    def tm_exact(self, source: str, *, project: int = 0) -> str | None:
+        """精确命中一条记忆译文。
+
+        `project` 必须传：`agent.db` 是**按 state 目录共用**的，A 项目写进去的
+        机翻如果在 B 项目命中，translate 会「只过 QA 就直接写进平台」，还报
+        「TM 命中」（看着是好事）。`project=0` 表示通用池（人工确认过的译法）。
+        """
         with self._lock:
             row = self.db.execute(
-                "SELECT target FROM tm WHERE src_hash=? ORDER BY quality DESC, created_at DESC LIMIT 1",
-                (src_hash(source),),
+                "SELECT target FROM tm WHERE src_hash=? AND project IN (0, ?)"
+                " ORDER BY quality DESC, created_at DESC LIMIT 1",
+                (src_hash(source), int(project)),
             ).fetchone()
         return row["target"] if row else None
 
-    def tm_search(self, source: str, *, top_k: int = 5, min_score: float = 0.45) -> list[TMHit]:
-        exact = self.tm_exact(source)
+    def tm_search(
+        self, source: str, *, top_k: int = 5, min_score: float = 0.45, project: int = 0
+    ) -> list[TMHit]:
+        exact = self.tm_exact(source, project=project)
         if exact:
             return [TMHit(source, exact, 1.0, "exact")]
         # 粗筛：同首两字符或包含原文前 6 字符，避免每次全表算 bigram
         prefix = source.strip()[:2]
         with self._lock:
             rows = self.db.execute(
-                "SELECT source, target, origin FROM tm WHERE substr(source,1,2)=? OR source LIKE ? LIMIT 400",
-                (prefix, f"%{source.strip()[:6]}%"),
+                "SELECT source, target, origin FROM tm WHERE project IN (0, ?)"
+                " AND (substr(source,1,2)=? OR source LIKE ?) LIMIT 400",
+                (int(project), prefix, f"%{source.strip()[:6]}%"),
             ).fetchall()
             if not rows:
                 rows = self.db.execute(
-                    "SELECT source, target, origin FROM tm ORDER BY id DESC LIMIT 400"
+                    "SELECT source, target, origin FROM tm WHERE project IN (0, ?)"
+                    " ORDER BY id DESC LIMIT 400",
+                    (int(project),),
                 ).fetchall()
         hits: list[TMHit] = []
         for r in rows:
@@ -298,6 +396,11 @@ class Store:
                 (term, translation, pos, note, json.dumps(list(variants), ensure_ascii=False),
                  source, status, time.time()),
             )
+            # 自己提交：以前靠调用方 `term_commit()`，忘了提交就在 close()
+            # 时被回滚（无返回、无日志 = 术语静默丢失），而且未提交的写事务
+            # 会一直握着写锁，WebUI 与 CLI 同时跑时另一个进程 30 秒后拿到
+            # `database is locked`。
+            self.db.commit()
 
     def term_all(self, *, status: str = "active") -> dict[str, dict]:
         with self._lock:
@@ -305,7 +408,13 @@ class Store:
         out: dict[str, dict] = {}
         for r in rows:
             d = dict(r)
-            d["variants"] = json.loads(d["variants"] or "[]")
+            try:
+                d["variants"] = json.loads(d["variants"] or "[]")
+            except (TypeError, ValueError) as exc:
+                # 认不出就当空 = 这个术语的同义变体永远不参与命中，且没人知道。
+                raise RuntimeError(
+                    f"术语 {d.get('term')!r} 的 variants 列不是合法 JSON：{d['variants']!r}"
+                ) from exc
             out[d["term"]] = d
         return out
 
@@ -353,31 +462,98 @@ class Store:
             self.db.commit()
 
     # ------------------------------------------------------------- Ledger
-    def ledger_done(self, pipeline: str, item_id: str, action: str) -> bool:
+    def ledger_done(
+        self, pipeline: str, item_id: str, action: str, *, project: int | None = None
+    ) -> bool:
+        """这条记录是否已存在（幂等判断/测试断言用）。`project` 给了就限定项目。"""
+        sql = "SELECT 1 FROM ledger WHERE pipeline=? AND item_id=? AND action=?"
+        params: list[object] = [pipeline, str(item_id), action]
+        if project is not None:
+            sql += " AND project=?"
+            params.append(int(project))
         with self._lock:
-            row = self.db.execute(
-                "SELECT 1 FROM ledger WHERE pipeline=? AND item_id=? AND action=?",
-                (pipeline, item_id, action),
-            ).fetchone()
+            row = self.db.execute(sql, params).fetchone()
         return row is not None
 
-    def ledger_mark(self, pipeline: str, item_id: str, action: str, detail: str = "") -> None:
+    def ledger_mark(
+        self,
+        pipeline: str,
+        item_id: str,
+        action: str,
+        detail: str = "",
+        *,
+        replace: bool = False,
+        project: int = 0,
+    ) -> None:
+        """记一笔。`replace=True` 时同一条目的同一动作会被**覆盖**（ts 也跟着更新）。
+
+        默认 `INSERT OR IGNORE` 是为了幂等（同一轮重跑不重复记账）；但人工编辑
+        这类"同一动作会发生多次"的记录必须覆盖，否则界面上永远只显示第一次的
+        时间，看起来像"这条上周改过一次、之后没人动"。
+
+        `project` 必须有：账本原先没有项目维度，`status` 的「已处理 N 条」是跨项目
+        累计，换个项目看到的数字里混着上一个项目的记录。
+        """
+        verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
         with self._lock:
             self.db.execute(
-                "INSERT OR IGNORE INTO ledger(pipeline, item_id, action, detail, ts) VALUES(?,?,?,?,?)",
-                (pipeline, str(item_id), action, detail[:500], time.time()),
+                f"{verb} INTO ledger(pipeline, item_id, action, detail, ts, project) "
+                "VALUES(?,?,?,?,?,?)",
+                (pipeline, str(item_id), action, detail[:500], time.time(), int(project)),
             )
+            # 同 term_upsert：自己提交，别把「写事务没提交」留给调用方决定
+            self.db.commit()
 
     def ledger_commit(self) -> None:
         with self._lock:
             self.db.commit()
 
-    def ledger_stats(self, pipeline: str) -> dict[str, int]:
+    def ledger_stats(self, pipeline: str, *, project: int | None = None) -> dict[str, int]:
+        """按动作统计条数。
+
+        `project` 给了就只数该项目，**但包含 project=0 的老记录**：
+        project 列是 v2 才加的，之前所有记录都是 0（无从判断属于哪个项目）。
+        排除它们会让升级后的 `ptz status` 从 0 开始，看起来像"数据没了"。
+        """
+        sql = "SELECT action, COUNT(*) c FROM ledger WHERE pipeline=?"
+        params: list[object] = [pipeline]
+        if project is not None:
+            sql += " AND project IN (0, ?)"
+            params.append(int(project))
+        sql += " GROUP BY action"
         with self._lock:
-            rows = self.db.execute(
-                "SELECT action, COUNT(*) c FROM ledger WHERE pipeline=? GROUP BY action", (pipeline,)
-            ).fetchall()
+            rows = self.db.execute(sql, params).fetchall()
         return {r["action"]: int(r["c"]) for r in rows}
+
+    def ledger_for_item(
+        self, item_id: str | int, *, limit: int = 50, project: int | None = None
+    ) -> list[dict]:
+        """某条词条的本地处理记录（谁/哪个环节/什么动作/时间）。
+
+        为什么需要它：平台的 `history` **只记网页端操作**，用批量接口写回的改动
+        根本不进历史（实测：改完译文再读 `/strings/{id}`，history 仍是 0 条）。
+        所以"这条被我们的流水线动过什么"只能靠本地账本，两边合起来才是完整记录。
+        """
+        sql = "SELECT pipeline, action, detail, ts, project FROM ledger WHERE item_id=?"
+        params: list[object] = [str(item_id)]
+        if project is not None:
+            # 同上：project=0 是"列存在之前"的老记录，不能因为过滤就看不见
+            sql += " AND project IN (0, ?)"
+            params.append(int(project))
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self.db.execute(sql, params).fetchall()
+        return [
+            {
+                "pipeline": r["pipeline"],
+                "action": r["action"],
+                "detail": r["detail"],
+                "ts": r["ts"],
+                "project": int(r["project"]),
+            }
+            for r in rows
+        ]
 
     # --------------------------------------------------------------- Meta
     def meta_set(self, k: str, v: str) -> None:
