@@ -54,6 +54,35 @@ class Action:
         return {"tool": self.tool, "args": self.args, "why": self.why}
 
 
+# 路径/目录 token：`overworld-town/loc-adultshop/`、`data\Actors.json`、`a/b/c.csv`
+_PATH_TOKEN = re.compile(r"[0-9A-Za-z_.\-]+(?:[/\\][0-9A-Za-z_.\-]+)+[/\\]?")
+
+
+def _path_tokens(text: str) -> list[str]:
+    """从人话里抽出路径/目录范围。
+
+    为什么需要它：用户会说「只翻 overworld-town/loc-adultshop/ 下所有文件」，
+    而工具默认是全项目取材。抽不出来就会**按全项目翻**（真实事故：指定目录 6 条，
+    实际翻了 200 条并写进平台）。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _PATH_TOKEN.finditer(text or ""):
+        raw = m.group(0).replace("\\", "/").strip()
+        parts = [x for x in raw.split("/") if x]
+        if not parts:
+            continue
+        if all(x.isdigit() for x in parts):
+            continue          # `2026/11/22` 这类是日期/版本号，不是路径
+        tok = "/".join(parts) + ("/" if raw.endswith("/") else "")
+        key = tok.rstrip("/").casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tok)
+    return out[:20]
+
+
 def _extract_args(text: str, tool: str) -> dict[str, Any]:
     args: dict[str, Any] = {}
     low = text.lower()
@@ -65,6 +94,11 @@ def _extract_args(text: str, tool: str) -> dict[str, Any]:
     m = re.search(r"(\d{1,5})\s*(?:条|个|句|行)", text) or re.search(r"limit\s*[:=]?\s*(\d{1,5})", low)
     if m and tool in ("translate", "review"):
         args["limit"] = min(int(m.group(1)), 5000)
+
+    # 范围：话里点了目录/文件就**必须**带上，不能让它退化成全项目
+    paths = _path_tokens(text)
+    if paths and tool in ("translate", "review", "run"):
+        args["files"] = paths
 
     if tool == "review" and ("疑问" in text or "打回" in text or "disputed" in low):
         args["include_disputed"] = True
@@ -133,16 +167,32 @@ def plan_actions(
     if not text:
         return {"steps": [], "reply": "请描述要做什么，例如「把未翻译的翻完并校对」。", "source": "empty"}
 
+    paths = _path_tokens(text)
     steps = rule_plan(text, tools)
-    if steps:
-        names = "、".join(s.tool for s in steps)
-        return {"steps": [s.as_dict() for s in steps], "reply": f"将执行：{names}", "source": "rule"}
-
-    if llm is not None and llm.available():
+    source = "rule"
+    if not steps and llm is not None and llm.available():
         steps = llm_plan(text, tools, llm, system_prompt)
-        if steps:
-            names = "、".join(s.tool for s in steps)
-            return {"steps": [s.as_dict() for s in steps], "reply": f"将执行：{names}", "source": "llm"}
+        source = "llm"
+    if steps:
+        # 安全网：话里点了范围，但吐出来的步骤没带范围 → 停手。
+        # 宁可让用户重说一句，也不能"以为只翻这个目录"却把全项目翻一遍并写进平台。
+        scoped = [s for s in steps if s.tool in ("translate", "review", "run")]
+        if paths and scoped and not all(s.args.get("files") for s in scoped):
+            return {
+                "steps": [],
+                "reply": (
+                    f"识别到范围「{'、'.join(paths)}」，但没能映射到工具参数，已停止执行。"
+                    "请改用「词条」页按文件处理，或在指令里给出平台中的完整路径。"
+                ),
+                "source": "guard",
+            }
+        names = "、".join(s.tool for s in steps)
+        scope = f"（范围：{'、'.join(paths)}）" if paths else ""
+        return {
+            "steps": [s.as_dict() for s in steps],
+            "reply": f"将执行：{names}{scope}",
+            "source": source,
+        }
 
     return {
         "steps": [],

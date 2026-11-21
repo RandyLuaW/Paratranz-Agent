@@ -284,6 +284,7 @@ class TranslatePipeline:
         max_items: int = DEFAULT_MAX_ITEMS,
         stats: "TranslateStats | None" = None,
         ids: Sequence[int] | None = None,
+        files: Sequence[str] | None = None,
     ) -> list[StringItem]:
         """采集本轮要翻的词条。
 
@@ -311,13 +312,15 @@ class TranslatePipeline:
                 stats.warnings.append(f"点名重翻的 {missing} 条在平台上读不到（可能已删除），已跳过")
             return picked
 
-        files = self.cfg.translate.files
+        # 单次任务的范围优先：Agent/接口可以点名「只翻这个目录」，
+        # 不传时才退到配置里的全局白名单。
+        wanted = list(files) if files is not None else list(self.cfg.translate.files)
         file_ids: list[int] | None = None
-        if files:
+        if wanted:
             # 与回写共用同一条白名单语义（精确相等或以 `项/` 开头）。
             # 子串匹配下 `files: ["a"]` 会选中所有含 a 的文件名。
             file_ids = [f.id for f in self.client.list_files()
-                        if matches_any(f.name, files)]
+                        if matches_any(f.name, wanted)]
             if not file_ids:
                 # 白名单配了但一个都没匹配到 —— 绝不能把空列表传给 iter_strings，
                 # 那里 `for fid in file or []` 会退化成"不传 file 参数"= 全项目翻译。
@@ -634,6 +637,7 @@ class TranslatePipeline:
         on_items: Callable[[list[dict]], None] | None = None,
         budget_check: Callable[[], None] | None = None,
         ids: Sequence[int] | None = None,
+        files: Sequence[str] | None = None,
     ) -> TranslateStats:
         """跑一轮翻译。
 
@@ -653,7 +657,9 @@ class TranslatePipeline:
             # 术语同步失败不该让翻译整轮不动：结果记进 stats，谁看报表谁发现。
             stats.terms_sync = self.sync_terms_from_platform(raise_on_error=False)
 
-        targets = self._collect(limit=limit, max_items=max_items, stats=stats, ids=ids)
+        targets = self._collect(
+            limit=limit, max_items=max_items, stats=stats, ids=ids, files=files
+        )
         stats.fetched = len(targets)
         if ids:
             # 点名的条目是"我就是要重翻"，不是"帮我找没翻的"：

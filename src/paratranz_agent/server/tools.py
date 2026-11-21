@@ -599,6 +599,28 @@ def _why_nothing_written(stats: Any) -> str:
     return f"取材 {stats.fetched} 条，但没有任何一条写入成功"
 
 
+def _files_of(kw: dict) -> list[str] | None:
+    """单次任务的文件/目录范围（`files` 参数）。
+
+    语义与配置里的 `translate.files` 完全一致（精确相等或以 `项/` 开头），
+    但只在这次任务里生效 —— Agent 说「只翻 overworld-town/loc-adultshop/」时
+    走这里，而不是去改全局配置。
+    """
+    raw = kw.get("files")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("files 必须是字符串数组（文件名或目录前缀）")
+    out: list[str] = []
+    for x in raw[:50]:
+        v = str(x or "").strip()
+        if v:
+            out.append(v)
+    return out or None
+
+
 def _ids_of(kw: dict) -> list[int] | None:
     """点名要处理的词条 id（WebUI 批量选择用）。最多 500 条。"""
     raw = kw.get("ids")
@@ -616,6 +638,7 @@ def tool_translate(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict
     _preflight(ctx, job, runner)
     limit, dry = _limit_of(ctx, kw), _dry_of(ctx, kw)
     ids = _ids_of(kw)
+    files = _files_of(kw)
     if ids:
         # 点名要的就是"这些"，再按 per_run_limit 截断会静默少翻几条
         # （审计实测：ids=3 而 per_run_limit=2 → 只翻 2 条，日志还写"3 条"）。
@@ -623,12 +646,13 @@ def tool_translate(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict
     pipe = _pipeline(ctx, "translate", job=job, runner=runner)
     on_items = (lambda rows: runner.item(job, rows)) if (job and runner) else None
     if job and runner:
+        scope = f"，范围 {'、'.join(files)}" if files else ""
         runner.log(
             job,
-            f"点名重翻 {len(ids)} 条（只处理这些，不再按阶段取材）" if ids
-            else f"拉取未翻译词条，上限 {limit} 条",
+            f"点名重翻 {len(ids)} 条（只处理这些，不再按阶段取材）{scope}" if ids
+            else f"拉取未翻译词条，上限 {limit} 条{scope}",
         )
-    stats = pipe.run(limit=limit, dry_run=dry, on_items=on_items, ids=ids)
+    stats = pipe.run(limit=limit, dry_run=dry, on_items=on_items, ids=ids, files=files)
     out = stats.as_dict()
     out["samples"] = stats.blocked_samples[:20]
     # 演练模式下 written 恒为 0，"有没有产出"要看 would_write
@@ -658,6 +682,14 @@ def tool_translate(ctx: AppContext, *, job=None, runner=None, **kw: Any) -> dict
         out["reason"] = _why_nothing_written(stats)
         if job and runner:
             runner.log(job, f"本轮没有写入任何条目：{out['reason']}", level="warn")
+    if files and stats.files_unmatched:
+        # 用户点名了范围却一个文件都没对上：这是范围写错/不存在，必须报错而不是
+        # 悄悄退化成"全项目"或"没有待翻译"（真实事故：指定目录 6 条，实际翻了 200 条）
+        raise ToolFailed(
+            f"指定的范围没有匹配到任何文件：{'、'.join(files)}。"
+            "请检查路径（应为平台里的文件全名或目录前缀，例如 overworld-town/loc-adultshop）",
+            out,
+        )
     if not stats.fetched:
         # 一条都没取到：不是失败，但也绝不能只显示「完成」——
         # 真实场景里这既可能是"项目已全部翻译"，也可能是阶段/文件/白名单条件不匹配，
@@ -1225,7 +1257,11 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "label_en": "Translate",
         "description": "TM 命中直出 + LLM 翻译 + 占位符硬拦 + 写回 stage=1",
         "description_en": "TM hits pass straight through + LLM translation + placeholder guard + write stage=1",
-        "params": {"limit": "本次最多处理条数"},
+        "params": {
+            "limit": "本次最多处理条数",
+            "files": "只处理这些文件或目录（前缀匹配，如 overworld-town/loc-adultshop）",
+            "ids": "只重翻这些词条 id",
+        },
         "writes": True,
         "agent": "allow",   # /api/agent 能否直接执行（缺标记=拦）
         "endpoint": "PUT /projects/{id}/strings",
