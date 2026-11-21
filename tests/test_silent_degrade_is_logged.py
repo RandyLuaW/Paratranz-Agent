@@ -128,7 +128,7 @@ def test_review_marks_issue_lookup_failure():
     from paratranz_agent.pipelines.review import ReviewStats
 
     class Boom:
-        def list_issues(self, **kw):
+        def iter_issues(self, **kw):
             raise RuntimeError("讨论区不可用")
 
     from paratranz_agent.config import AgentConfig

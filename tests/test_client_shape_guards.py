@@ -31,9 +31,20 @@ def test_unwrap_page_accepts_known_shapes():
     assert unwrap_page([1, 2]) == [1, 2]
     assert unwrap_page({"results": [1, 2]}) == [1, 2]
     assert unwrap_page({"rows": []}) == []
-    # 空字典 / None 才是真的没有数据
+    # 空字典才是真的没有数据
     assert unwrap_page({}) == []
-    assert unwrap_page(None) == []
+
+
+def test_unwrap_page_raises_on_none():
+    """`None` 不是「没有数据」，是「响应体里什么都没有」。
+
+    原来的坏法：`None → []`，于是网关回空包时列表接口返回 0 条，
+    面板显示「词条 0 / 术语 0」，translate 报「没有待翻译词条，完成」——
+    看起来一切正常，实际一条都没读到。
+    """
+    with pytest.raises(ParaTranzError) as exc:
+        unwrap_page(None)
+    assert "无法识别" in str(exc.value)
 
 
 @pytest.mark.parametrize("bad", [{"payload": [1]}, {"total": 3}, {"items": {"a": 1}}])
@@ -55,12 +66,12 @@ def test_iter_terms_stops_when_platform_ignores_page(monkeypatch):
     c = _client()
     calls = {"n": 0}
 
-    def fake_list(page: int = 1, page_size: int = 500):
+    def fake_page(page: int = 1, page_size: int = 500):
         calls["n"] += 1
         assert calls["n"] < 6, "重复 id 没有被识别，仍在翻页"
-        return [Term(id=1, term="same", translation="x")] * page_size
+        return [Term(id=1, term="same", translation="x")] * page_size, {}
 
-    monkeypatch.setattr(c, "list_terms", fake_list)
+    monkeypatch.setattr(c, "_terms_page", fake_page)
     got = list(c.iter_terms(page_size=500))
     assert len(got) == 500, "只应产出第一页（后面全是重复 id）"
     assert calls["n"] == 2, "第二次发现全是重复就该停"
@@ -72,14 +83,14 @@ def test_iter_terms_has_hard_page_cap(monkeypatch):
     c = _client()
     counter = {"i": 0}
 
-    def fake_list(page: int = 1, page_size: int = 500):
+    def fake_page(page: int = 1, page_size: int = 500):
         # 每页都塞满、且 id 全新 —— 模拟"平台永远有下一页"的异常情况
         counter["i"] += 1
         base = counter["i"] * 1000
         return [Term(id=base + k, term=f"t{base + k}", translation="x")
-                for k in range(page_size)]
+                for k in range(page_size)], {}
 
-    monkeypatch.setattr(c, "list_terms", fake_list)
+    monkeypatch.setattr(c, "_terms_page", fake_page)
     got = list(c.iter_terms(page_size=500, max_pages=3))
     assert len(got) == 3 * 500, len(got)
     assert counter["i"] == 3, "超过 max_pages 还在请求"

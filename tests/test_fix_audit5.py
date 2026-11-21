@@ -241,8 +241,11 @@ def test_agent_path_does_not_auto_run_dangerous_tools():
     这条用源码断言守住提交处的过滤逻辑（避免搭整套 app 夹具）。
     """
     block = (ROOT / "src/paratranz_agent/server/routes/agent.py").read_text(encoding="utf-8")
-    assert "DANGEROUS_TOOLS" in block, "agent 提交处必须过滤危险工具"
-    assert "needs_confirm" in block, "被拦下的危险步骤要回给用户看"
+    # 判定来源统一到 TOOL_SPECS 的 `agent` 标记（缺标记=拦）：
+    # 以前是手写黑名单，只列了 extract 系，于是 writeback --in-place、
+    # extraction_import/upload 都能被模型一句话直接执行。
+    assert "agent_needs_confirm" in block, "agent 提交处必须按统一标记判定，不能手写名单"
+    assert "needs_confirm" in block, "被拦下的步骤要回给用户看"
 
 
 # ------------------------------------------------- 7. 预算：GET→PUT 回传必须合法

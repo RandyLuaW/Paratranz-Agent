@@ -1632,6 +1632,44 @@ def main() -> int:
               and "mirror" in json.dumps(bad_mode.json(), ensure_ascii=False),
               f"{bad_mode.status_code} {bad_mode.text[:60]}")
 
+        print("\n== 词条工作台 ==")
+        # 这组端点是「模型改远端数据、人会改错」的补救通道：能看、能改、能查记录。
+        # 真 HTTP 打一遍，确认中间件没把它挡住、形状也没漂。
+        sl = c.get("/api/strings", params={"page": 1, "page_size": 5})
+        check("词条列表可读", sl.status_code == 200 and bool(sl.json().get("items")),
+              f"{sl.status_code} total={sl.json().get('total')}")
+        check("词条列表带阶段中文名",
+              all("stage_zh" in x for x in sl.json().get("items", [])), "")
+        sid = (sl.json().get("items") or [{}])[0].get("id")
+        one = c.get(f"/api/strings/{sid}")
+        check("词条详情带改动记录字段",
+              one.status_code == 200 and isinstance(one.json().get("history"), list),
+              f"{one.status_code}")
+        bad_stage = c.get("/api/strings", params={"stage": "abc"})
+        check("词条阶段非法值 400", bad_stage.status_code == 400, str(bad_stage.status_code))
+        c.put("/api/settings", json={"dry_run": True})
+        dry = c.put(f"/api/strings/{sid}", json={"translation": "演练不落库"})
+        check("词条编辑在演练模式下只回显",
+              dry.status_code == 200 and dry.json().get("dry_run") is True
+              and dry.json().get("would_write", {}).get("translation") == "演练不落库",
+              f"{dry.status_code} {dry.text[:60]}")
+        rec = c.get("/api/records", params={"page_size": 3})
+        check("改动流水可读", rec.status_code == 200 and "items" in rec.json(), str(rec.status_code))
+
+        # 批量：演练模式下只回显、非法入参 400
+        b_ids = [x["id"] for x in (sl.json().get("items") or [])[:2]]
+        dry_batch = c.post("/api/strings/batch",
+                           json={"ids": b_ids, "action": "stage", "stage": 3})
+        check("批量改阶段在演练模式下只回显",
+              dry_batch.status_code == 200 and dry_batch.json().get("dry_run") is True,
+              f"{dry_batch.status_code} {dry_batch.text[:60]}")
+        check("批量非法 action 被拒（400）",
+              c.post("/api/strings/batch", json={"ids": b_ids, "action": "nope"}).status_code == 400,
+              "")
+        check("批量空 ids 被拒（400）",
+              c.post("/api/strings/batch", json={"ids": [], "action": "stage",
+                                                 "stage": 3}).status_code == 400, "")
+
         print("\n== 最终状态 ==")
         p2 = c.get("/api/project").json()["progress"]
         check("翻译后进度上升", p2["translated"] > 3, f"translated={p2['translated']}")

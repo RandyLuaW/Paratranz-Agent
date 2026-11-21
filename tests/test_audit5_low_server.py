@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -54,9 +55,17 @@ def test_job_registry_and_logs_are_bounded():
     runner = JobRunner(EventBus(), {"noop": noop})
     try:
         assert jobs_mod.MAX_JOBS >= 10
-        # 直接灌满到上限 + 5，检查字典不会比 _order 多
+        # 灌满到上限 + 5 再等它们跑完：字典的不变量是
+        # 「最多 MAX_JOBS 个已结束任务 + 当前未结束的那些」，
+        # 正在跑的任务不允许被驱逐（否则 GET /api/jobs/{id} 会 404）。
         for _ in range(jobs_mod.MAX_JOBS + 5):
             runner.submit("noop", {})
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            alive = [j for j in runner.jobs.values() if j.status in ("queued", "running")]
+            if not alive:
+                break
+            time.sleep(0.02)
         assert len(runner.jobs) <= jobs_mod.MAX_JOBS, "jobs 字典没有跟着 _order 淘汰"
         # 日志上限：塞满再截
         job = runner.submit("noop", {})

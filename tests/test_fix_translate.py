@@ -166,14 +166,15 @@ def test_partial_write_failure_keeps_tm_and_ledger(client, cfg, store, fake, mon
     assert len(written) == 2
     assert stats.written == len(written)
     for s in written:
-        assert store.tm_exact(s["original"]) == s["translation"], f"{s['key']} 未回填 TM"
+        assert store.tm_exact(s["original"], project=client.project_id) == s["translation"], \
+            f"{s['key']} 未回填 TM"
         assert store.ledger_done("translate", str(s["id"]), "write"), f"{s['key']} 未记账"
     assert store.tm_size() == 2
     assert store.ledger_stats("translate").get("write") == 2
     # 未写入的条目不能提前进 TM / 账本，否则下一轮会误判"已翻过"
     for s in fake.state["strings"]:
         if s["key"].startswith(("m6", "m7", "m8", "m9", "m10")) or s["key"].startswith(("i", "q")):
-            assert store.tm_exact(s["original"]) is None
+            assert store.tm_exact(s["original"], project=client.project_id) is None
 
 
 def test_dry_run_writes_nothing_but_reports_plan(client, cfg, store, fake):
@@ -183,7 +184,8 @@ def test_dry_run_writes_nothing_but_reports_plan(client, cfg, store, fake):
     stats = pipe.run(dry_run=True)
 
     assert len(_pending(fake)) == pending_before, "dry-run 不该写入平台"
-    assert stats.written == 21, f"dry-run 应报'将写入多少'，实际 {stats.written}"
+    assert stats.written == 0, "dry-run 没有真的写平台，written 必须是 0"
+    assert stats.would_write == 21, f"dry-run 的预估值应放在 would_write，实际 {stats.would_write}"
     assert store.tm_size() == 0 and store.ledger_stats("translate") == {}
     assert stats.skipped_manual == 0 and stats.manual_risk == 0
     assert stats.dry_run is True
@@ -241,7 +243,7 @@ def test_sync_terms_forbidden_is_reported_not_swallowed(client, cfg, store, monk
     def forbidden(*args, **kw):
         raise ParaTranzError(403, "无权访问术语表", "/projects/6896/terms")
 
-    monkeypatch.setattr(client, "list_terms", forbidden)
+    monkeypatch.setattr(client, "_terms_page", forbidden)
     pipe = TranslatePipeline(client, cfg, store, FakeLLM())
 
     res = pipe.sync_terms_from_platform()
@@ -262,7 +264,7 @@ def test_sync_terms_hard_failure_raises_by_default(client, cfg, store, monkeypat
     def broken(*args, **kw):
         raise ParaTranzError(500, "internal error", "/projects/6896/terms")
 
-    monkeypatch.setattr(client, "list_terms", broken)
+    monkeypatch.setattr(client, "_terms_page", broken)
     pipe = TranslatePipeline(client, cfg, store, FakeLLM())
 
     with pytest.raises(ParaTranzError):

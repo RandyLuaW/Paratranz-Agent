@@ -73,6 +73,7 @@ class FakeLLM(BaseLLM):
         messages: Sequence[dict],
         *,
         json_mode: bool = False,
+        json_schema: dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
