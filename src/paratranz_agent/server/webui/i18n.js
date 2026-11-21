@@ -92,6 +92,32 @@ const LANG_RULES = [
   [/^磁盘 (\d+) 个文件 (.+)$/, '$1 files on disk, $2'],
   [/^(\d+) 个文件 · (.+)$/, '$1 files · $2'],
   [/^(\d+) 个模型（(\d+) 个源已配 Key）$/, '$1 models ($2 providers with a key)'],
+  // —— 词条工作台（整句带插值，进不了字典，只能走规则） ——
+  [/^(\d+) 条 · 第 (\d+) \/ (\d+) 页 · 点任意行查看原文、上下文与处理记录$/,
+    (m) => `${m[1]} strings · page ${m[2]} / ${m[3]} · click a row for original, context and records`],
+  [/^本页匹配 (\d+) 条$/, '$1 matching on this page'],
+  [/^本页过滤后 (\d+) 条$/, '$1 matching on this page'],
+  [/^（待翻 (\d+)）$/, ' ($1 untranslated)'],
+  // 文件下拉的 option 是一整个文本节点「路径（待翻 12）」，只能整串匹配
+  [/^(.+)（待翻 (\d+)）$/, '$1 ($2 untranslated)'],
+  [/^(\d+) 条\/页$/, '$1 / page'],
+  [/^本机处理记录（(\d+) 条）—— 我们的流水线对这条做过什么$/,
+    (m) => `Local processing log (${m[1]}) — what our pipelines did to this string`],
+  [/^平台人工改动记录（(\d+) 条）$/, 'Manual changes on the platform ($1)'],
+  // 文件页：展开词条面板
+  [/^(\d+) 个文件 · (\d+) 个目录 · 点文件行展开该文件的全部词条，可就地改译文$/,
+    (m) => `${m[1]} files · ${m[2]} directories · click a file row to expand all its strings and edit in place`],
+  [/^共 (\d+) 条 · 本页匹配 (\d+)$/, '$1 strings · $2 matching on this page'],
+  [/^(\d+) \/ (\d+)$/, '$1 / $2'],
+  [/^已选 (\d+) 条$/, '$1 selected'],
+  [/^已提交 (\d+) 条，平台确认 (\d+) 条$/, 'Submitted $1, platform confirmed $2'],
+  // 实时面板的计数行：`处理中 3 · 已产出 40 · 已写入 40`
+  [/^((?:处理中|已产出|记忆命中|被拦|失败|已写入|未回结果) \d+(?: · (?:处理中|已产出|记忆命中|被拦|失败|已写入|未回结果) \d+)*)$/,
+    (m) => m[1]
+      .replace(/处理中/g, 'in flight').replace(/已产出/g, 'produced')
+      .replace(/记忆命中/g, 'TM hit').replace(/被拦/g, 'blocked')
+      .replace(/失败/g, 'failed').replace(/已写入/g, 'written')
+      .replace(/未回结果/g, 'no result')],
 ];
 
 /* 不参与翻译的容器：代码、脚本、输入框、以及显式标记的区域 */

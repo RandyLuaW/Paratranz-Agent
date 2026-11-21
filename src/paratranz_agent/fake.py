@@ -99,6 +99,9 @@ def _seed() -> dict[str, Any]:
         },
         "files": files,
         "strings": strings,
+        # 改动流水：真实平台 `GET /strings/{id}` 会带 history，`GET /history` 是全项目流水。
+        # 词条工作台靠它显示"谁把什么改成了什么"，假平台不实现就永远测不到这段。
+        "history": [],
         "terms": [
             {"id": 1, "term": "farm", "translation": "农场", "pos": "noun", "variants": ["farms"]},
         ],
@@ -281,14 +284,61 @@ class FakeParaTranz:
                 s = by_id.get(sid)
                 if not s:
                     continue
+                before = s.get("translation", "")
                 if "translation" in it:
                     s["translation"] = it["translation"]
                     if "stage" not in it:
                         s["stage"] = 1 if it["translation"] else 0
                 if "stage" in it:
                     s["stage"] = int(it["stage"])
+                if s.get("translation", "") != before:
+                    self.state["history"].append(
+                        {
+                            "id": 9000 + len(self.state["history"]),
+                            "createdAt": "2024-01-01T00:00:00.000Z",
+                            "field": "translation",
+                            "operation": "edit",
+                            "tid": sid,
+                            "project": pid,
+                            "uid": 42,
+                            "from": before,
+                            "to": s.get("translation", ""),
+                            "target": {
+                                "key": s.get("key"),
+                                "stage": s.get("stage"),
+                                "original": s.get("original"),
+                                "translation": s.get("translation"),
+                            },
+                            "user": {"id": 42, "username": "agent"},
+                        }
+                    )
                 updated.append(sid)
             return self._json(updated)
+
+        # 单条词条（带 history / importHistory / comments）——词条工作台的详情靠它
+        m_one = re.fullmatch(rf"/api/projects/{pid}/strings/(\d+)", path)
+        if method == "GET" and m_one:
+            sid = int(m_one.group(1))
+            row = next((s for s in self.state["strings"] if s["id"] == sid), None)
+            if row is None:
+                return httpx.Response(404, json={"message": "Not Found"})
+            return self._json(
+                {
+                    **row,
+                    "history": [h for h in self.state["history"] if h["tid"] == sid],
+                    "importHistory": [],
+                    "comments": [],
+                }
+            )
+
+        if method == "GET" and re.fullmatch(rf"/api/projects/{pid}/history", path):
+            rows = self.state["history"]
+            tid = url.params.get("tid")
+            if tid:
+                rows = [h for h in rows if h["tid"] == int(tid)]
+            return self._page(
+                rows, int(url.params.get("page", 1)), int(url.params.get("pageSize", 100))
+            )
 
         if method == "GET" and re.fullmatch(rf"/api/projects/{pid}/terms", path):
             return self._page(

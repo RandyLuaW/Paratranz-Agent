@@ -22,6 +22,26 @@ const state = {
   wbSel: '',        // 「回写」页当前选中的提取记录
   _wbStop: null,    // 回写参数区的停止钩子（换记录 / 切页前先掐掉轮询）
   agentReplyHtml: '',   // 最近一次 Agent 回复的 HTML（含 needs_confirm 提示，切页重绘不丢）
+  /* 词条级实时进度：id → {original, translation, status, reason, ts}。
+     来自 SSE 的 `item` 事件；只做展示，成败一律以任务结果里的计数为准。 */
+  live: new Map(),
+  liveJob: '',
+  /* 「词条」页的筛选与游标。平台没有服务端搜索（实测 `search`/`q` 参数被忽略），
+     所以只有阶段/文件两个服务端条件 + 本地过滤，不假装能全库搜。
+     `loadedKey` 记录"当前这批数据是哪个查询条件拉回来的"——用它判断要不要发请求，
+     而不是拿 `items.length===0` 当"没加载过"：后者在"查无结果"时会无限重拉（自激）。 */
+  str: { file: '', stage: '0', page: 1, size: 50, q: '', items: [], total: 0, pages: 0,
+         sel: null, detail: null, loading: false, loadedKey: '' },
+  /* 「文件」页展开的文件与其词条列表。和 state.str 分开：两页各有自己的
+     筛选与游标，混用会出现"在文件页翻页，词条页的页码也跟着变"。 */
+  fileView: { fid: '', page: 1, size: 50, stage: '', q: '', items: [], total: 0, pages: 0,
+              loadedKey: '', loading: false },
+  /* 词条详情是**全局**的：词条页与文件页都能打开同一条，且共用同一份
+     「原文 / 译文 / 两份记录」。放在某一页的状态里，另一页就看不到它。 */
+  detail: null,
+  detailId: null,
+  /* 批量选择：词条页与文件页共用一份（两页都能选，操作按钮只有一处实现） */
+  batch: new Set(),
 };
 
 const esc = (s) =>
@@ -62,6 +82,7 @@ async function api(method, path, body) {
 const VIEWS = {
   overview:   { group: '工作台', name: '概览' },
   jobs:       { group: '工作台', name: '任务' },
+  strings:    { group: '工作台', name: '词条' },
   files:      { group: '工作台', name: '文件' },
   extract:    { group: '工作台', name: '提取' },
   writeback:  { group: '工作台', name: '回写' },
@@ -93,6 +114,19 @@ function metric(k, v, opts) {
   return `<div class="metric${o.cls ? ' ' + o.cls : ''}">
     <div class="k">${esc(k)}</div>
     <div class="v">${v}${o.unit ? `<small>${esc(o.unit)}</small>` : ''}</div>
+    ${o.ico ? `<div class="ico">${o.ico}</div>` : ''}
+  </div>`;
+}
+
+/* 后端特意把「读不到」和「0」分成两个字段（tasks_error / terms_error），
+   前端以前只读数字，token 过期时显示「术语 0 条」，与真空库一模一样 ——
+   用户会去补术语，实际是读失败。这里把失败显示出来。 */
+function renderMetricOrError(k, v, err, opts) {
+  if (!err) return metric(k, v, opts);
+  const o = opts || {};
+  return `<div class="metric${o.cls ? ' ' + o.cls : ''}" title="${esc(err)}">
+    <div class="k">${esc(k)}</div>
+    <div class="v" style="color:var(--err);font-size:15px">读取失败</div>
     ${o.ico ? `<div class="ico">${o.ico}</div>` : ''}
   </div>`;
 }
@@ -232,7 +266,11 @@ function connectSSE() {
     } else if (data.type === 'job') {
       pushLog({ ts: data.ts, level: data.job.status === 'failed' ? 'error' : 'info',
                 msg: `任务 ${data.job.tool} → ${data.job.status}` });
+      const st = data.job.status;
+      if (st && st !== 'running' && st !== 'queued') settleLive(st);
       refreshJobs();
+    } else if (data.type === 'item') {
+      pushItems(data.job_id, data.items, data.ts);
     } else if (data.type === 'settings') {
       state.settings = data.settings;
       $('#dryRun').checked = !!data.settings.dry_run;
@@ -246,6 +284,9 @@ function switchView(v) {
   clearTimeout(state._extTimer);
   // 回写页的轮询/倒计时要跟着切页一起停（页面被换掉后没人再写这块 DOM）
   if (state._wbStop) { state._wbStop(); state._wbStop = null; }
+  // 换页就丢掉批量选择：否则在文件页勾的条目会跟着到词条页，
+  // 而那一页根本看不到它们 —— 一次批量操作就打到"看不见的地方"。
+  if (state.view !== v && state.batch && state.batch.size) state.batch.clear();
   state.view = v;
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === v));
   setCrumb(v);
@@ -258,6 +299,7 @@ function render() {
   const v = state.view;
   if (v === 'overview') renderOverview(main);
   else if (v === 'jobs') renderJobs(main);
+  else if (v === 'strings') renderStrings(main);
   else if (v === 'files') renderFiles(main);
   else if (v === 'extract') renderExtract(main);
   else if (v === 'writeback') renderWriteback(main);
@@ -314,7 +356,9 @@ function renderOverview(main) {
       `${esc(p.project.source)} → ${esc(p.project.dest)}
        · 任务功能${p.project.task_enabled ? '已开启' : '<b style="color:var(--warn)">未开启</b>'}
        · 校对等级 ${p.project.review_mode}
-       · 平台任务 ${openTasks} 个进行中`,
+       · ${p.tasks_error
+          ? '<b style="color:var(--err)" title="' + esc(p.tasks_error) + '">平台任务读取失败</b>'
+          : `平台任务 ${openTasks} 个进行中`}`,
       '<button class="btn" id="refreshProj">刷新</button>'
     )}
 
@@ -333,7 +377,7 @@ function renderOverview(main) {
       ${metric('有疑问', g.disputed, { cls: g.disputed ? 'err' : '', ico: '?' })}
       ${metric('文件', g.files, { ico: '▦' })}
       ${metric('词数', fmtNum(g.words), { ico: '#' })}
-      ${metric('术语', p.terms, { ico: '≡' })}
+      ${renderMetricOrError('术语', p.terms, p.terms_error, { ico: '≡' })}
       ${metric('本地 TM', p.local_tm, { ico: '⧉' })}
     </div>
 
@@ -530,9 +574,30 @@ function renderJobs(main) {
   main.innerHTML = `
     ${pageHead('任务', `共 ${state.jobs.length} 个 · 运行中 ${running} 个 · 点标题展开日志`,
       '<button class="btn" id="refreshJobs">刷新</button>')}
+    <div id="liveHost">${livePanel()}</div>
     <div id="jobList">${state.jobs.length ? state.jobs.map(jobCard).join('') : '<div class="empty">还没有任务</div>'}</div>`;
   $('#refreshJobs').onclick = () => refreshJobs(true);
   bindJobCards($('#jobList'));
+  bindLiveAndRows($('#liveHost'));
+}
+
+/* 刷新页面后实时面板会空：从正在跑的那个任务把最近一批词条捞回来
+ * （后端 `GET /api/jobs/{id}` 的 items 就是为这个准备的） */
+async function hydrateLive(jobId) {
+  if (!jobId || state.live.size) return;
+  try {
+    const { job } = await api('GET', `/api/jobs/${jobId}`);
+    // await 期间 SSE 可能已经推进过：只在仍然为空时补，且只补缺失的 id，
+    // 否则会把实时状态回写成更旧的快照
+    if (state.live.size || !job || !Array.isArray(job.items)) return;
+    state.liveJob = job.id;
+    job.items.forEach((it) => {
+      const id = Number(it && it.id);
+      if (!Number.isFinite(id) || state.live.has(id)) return;
+      state.live.set(id, { ...it, id, ts: Number(it.ts) || 0 });
+    });
+    paintLive();
+  } catch { /* 拿不到就不显示，不挡其他功能 */ }
 }
 
 async function refreshJobs(rerender = false) {
@@ -548,6 +613,8 @@ async function refreshJobs(rerender = false) {
     const running = jobs.filter((j) => j.status === 'running' || j.status === 'queued').length;
     const badge = $('#badgeJobs');
     if (badge) badge.textContent = running > 0 ? String(running) : '';
+    const alive = jobs.find((j) => j.status === 'running');
+    if (alive) hydrateLive(alive.id);
     if (rerender || state.view === 'jobs') render();
     else if (state.view === 'overview') renderRecentJobs();
   } catch { /* 静默 */ }
@@ -557,10 +624,13 @@ async function refreshJobs(rerender = false) {
 function renderFiles(main) {
   const rows = state.files || [];
   const dirs = state.dirs || [];
+  const fv = state.fileView;
   main.innerHTML = `
     ${pageHead('文件',
-      `${rows.length} 个文件 · ${dirs.length} 个目录 · 按待翻译量降序`,
+      `${rows.length} 个文件 · ${dirs.length} 个目录 · 点文件行展开该文件的全部词条，可就地改译文`,
       '<button class="btn" id="refreshFiles">刷新</button>')}
+    ${state.detail ? strDetailHtml(state.detail) : ''}
+    <div id="batchHost">${batchBarHtml()}</div>
     ${dirs.length ? dirs.map((d) => {
       const items = rows.filter((f) => f.dir === d.dir);
       return `
@@ -579,20 +649,248 @@ function renderFiles(main) {
             <th class="num">已翻译</th><th class="num">有疑问</th><th>进度</th>
           </tr></thead>
           <tbody>
-            ${items.map((f) => `
-              <tr>
-                <td class="mono">${esc(f.name.split('/').pop())}</td>
+            ${items.map((f) => {
+              const open = String(fv.fid) === String(f.id);
+              return `
+              <tr class="filerow${open ? ' open' : ''}" data-fid="${esc(f.id)}">
+                <td class="mono"><span class="caret">${open ? '▾' : '▸'}</span>${esc(f.name.split('/').pop())}</td>
                 <td class="num">${f.total}</td>
                 <td class="num" style="color:${f.pending ? 'var(--warn)' : 'inherit'}">${f.pending}</td>
                 <td class="num">${f.percent}%</td>
                 <td class="num" style="color:${f.disputed ? 'var(--err)' : 'inherit'}">${f.disputed || '—'}</td>
                 <td><span class="mini-bar"><i style="width:${f.percent}%"></i></span></td>
-              </tr>`).join('')}
+              </tr>
+              ${open ? `<tr class="filepanel"><td colspan="6">${fileStringsPanelHtml(f)}</td></tr>` : ''}`;
+            }).join('')}
           </tbody>
         </table>
       </div>`;
     }).join('') : '<div class="empty">还没有数据，先点刷新或去设置里连项目</div>'}`;
+
   $('#refreshFiles').onclick = () => loadFiles(true);
+  bindFileRows(main);
+  bindFilePanel(main);
+  bindDetail(main);
+  bindBatch(main);
+  if (fv.fid && !fv.loading && fv.loadedKey !== fileQueryKey()) loadFileStrings();
+}
+
+function bindFileRows(root) {
+  root.querySelectorAll('tr.filerow').forEach((tr) => {
+    tr.onclick = () => {
+      const fid = String(tr.dataset.fid || '');
+      const fv = state.fileView;
+      if (String(fv.fid) === fid) {          // 再点一次收起
+        fv.fid = '';
+        render();
+        return;
+      }
+      Object.assign(fv, {
+        fid, page: 1, stage: '', q: '', items: [], total: 0, pages: 0, loadedKey: '',
+      });
+      closeDetail();
+      render();                              // 先铺开面板（显示"读取中"），再拉数据
+    };
+  });
+}
+
+function fileQueryKey() {
+  const fv = state.fileView;
+  return `${fv.fid}|${fv.page}|${fv.size}|${fv.stage}`;
+}
+
+/* 展开后的文件面板：该文件全部词条 + 就地编辑 + 实时回填 */
+function fileStringsPanelHtml(f) {
+  const fv = state.fileView;
+  const q = fv.q.trim().toLowerCase();
+  const shown = q
+    ? fv.items.filter((r) => (r.original + '\u0000' + r.translation).toLowerCase().includes(q))
+    : fv.items;
+  return `<div class="filepanel-in">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+      <b class="mono" style="font-size:12px">${esc(f.name)}</b>
+      <span class="muted" style="font-size:11.5px">共 ${fv.total} 条${
+        q ? ` · 本页匹配 ${shown.length}` : ''}</span>
+      <div class="spacer"></div>
+      <select class="field" id="fpStage" style="width:120px">
+        ${[['', '全部阶段'], ['0', '未翻译'], ['1', '已翻译'], ['2', '有疑问'],
+           ['3', '已检查'], ['5', '已审核'], ['9', '锁定']]
+          .map(([v, label]) => `<option value="${v}"${fv.stage === v ? ' selected' : ''}>${label}</option>`)
+          .join('')}
+      </select>
+      <input class="field" id="fpQ" placeholder="在本页内过滤原文/译文" style="width:180px"
+        value="${esc(fv.q)}">
+      <select class="field" id="fpSize" style="width:100px">
+        ${[25, 50, 100, 200].map((n) => `<option value="${n}"${
+          fv.size === n ? ' selected' : ''}>${n} 条/页</option>`).join('')}
+      </select>
+      <button class="btn sm" id="fpPrev"${fv.page <= 1 ? ' disabled' : ''}>上一页</button>
+      <span class="dim" style="font-size:11.5px">${fv.page} / ${fv.pages || 1}</span>
+      <button class="btn sm" id="fpNext"${fv.page >= (fv.pages || 1) ? ' disabled' : ''}>下一页</button>
+    </div>
+    ${shown.length ? `<table class="fp-table">
+      <thead><tr><th style="width:30px"><input type="checkbox" id="fpPickAll"></th>
+        <th style="width:36%">原文</th><th style="width:38%">译文（点一下即可改）</th>
+        <th style="width:96px">阶段</th><th style="width:150px;white-space:nowrap">AI / 操作</th></tr></thead>
+      <tbody>${shown.map((r) => `<tr data-sid="${esc(r.id)}">
+        <td><input type="checkbox" data-pick="${esc(r.id)}"${
+          state.batch.has(Number(r.id)) ? ' checked' : ''}></td>
+        <td style="font-size:12px" data-editable="${esc(r.id)}">
+          <div class="st-tr-text st-orig" data-no-i18n>${esc(r.original)}</div></td>
+        <td style="font-size:12px" data-editable="${esc(r.id)}">
+          <div class="st-tr-text st-trans" data-no-i18n>${r.translation
+            ? esc(r.translation)
+            : '<span class="dim">（空）</span>'}</div></td>
+        <td style="white-space:nowrap"><span class="st-stage">${stageTag(r.stage)}</span></td>
+        <td><span class="tag st-live"></span>
+          <button class="btn sm" data-detail="${esc(r.id)}">详情</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`
+    : `<div class="empty">${fv.loading ? '读取中…'
+        : (q ? '本页没有匹配的条目' : '这个阶段下没有词条')}</div>`}
+    ${fv.total > fv.size ? `<div class="dim" style="font-size:11px;margin-top:6px">
+      只显示当前页；改完点这一行右侧的「详情」可看上下文与两份记录。</div>` : ''}
+  </div>`;
+}
+
+function bindFilePanel(main) {
+  const fv = state.fileView;
+  const reload = (patch) => {
+    Object.assign(fv, patch);
+    closeDetail();
+    state.batch.clear();
+    render();
+    return loadFileStrings();
+  };
+  const st = $('#fpStage');
+  if (st) st.onchange = (e) => reload({ stage: e.target.value, page: 1 });
+  const sz = $('#fpSize');
+  if (sz) sz.onchange = (e) => reload({ size: Number(e.target.value) || 50, page: 1 });
+  const prev = $('#fpPrev');
+  if (prev) prev.onclick = () => reload({ page: Math.max(1, fv.page - 1) });
+  const next = $('#fpNext');
+  if (next) next.onclick = () => reload({ page: fv.page + 1 });
+  const qb = $('#fpQ');
+  if (qb) {
+    qb.oninput = () => {                     // 只筛 DOM，不重绘（重绘会失焦）
+      fv.q = qb.value;
+      const k = fv.q.trim().toLowerCase();
+      const panel = qb.closest('.filepanel-in');
+      if (!panel) return;
+      panel.querySelectorAll('.fp-table tbody tr').forEach((tr) => {
+        const cells = tr.querySelectorAll('.st-tr-text');
+        const hay = [...cells].map((c) => c.textContent).join('\u0000').toLowerCase();
+        tr.style.display = !k || hay.includes(k) ? '' : 'none';
+      });
+    };
+  }
+  // 点**译文**格子 → 就地变成编辑框。原文格子不绑：点原文却弹出译文编辑器
+  // 会让人以为改的是原文（实测过，容易改错方向）。
+  main.querySelectorAll('[data-editable]').forEach((td) => {
+    if (!td.querySelector('.st-trans')) return;
+    td.onclick = (ev) => {
+      if (ev.target.closest('button')) return;
+      if (td.querySelector('textarea')) return;
+      openInlineEditor(td, Number(td.dataset.editable));
+    };
+  });
+  main.querySelectorAll('[data-detail]').forEach((b) => {
+    b.onclick = () => openString(Number(b.dataset.detail));
+  });
+}
+
+/* 就地编辑：把译文格子换成 textarea + 保存/取消。
+ * 不用 contenteditable：译文里本来就可能带 HTML 控制符，改起来风险更大。 */
+function openInlineEditor(td, id) {
+  const row = (state.fileView.items || []).find((r) => r.id === id)
+    || (state.str.items || []).find((r) => r.id === id)
+    || { id, translation: '' };
+  // 存**整个格子**的 HTML：只存内层会把 `.st-trans` 这层也丢掉，
+  // 取消之后实时回填就再也找不到这一格了（实测踩到）。
+  const original = td.innerHTML;
+  td.innerHTML = `<textarea class="field" style="width:100%;min-height:52px;font-size:12px"
+      data-no-i18n>${esc(row.translation || '')}</textarea>
+    <div style="display:flex;gap:6px;margin-top:4px">
+      <button class="btn sm primary" data-save="1">保存</button>
+      <button class="btn sm" data-cancel="1">取消</button>
+      <span class="dim" style="font-size:11px">Ctrl+Enter 保存</span>
+    </div>`;
+  const box = td.querySelector('textarea');
+  box.focus();
+  const cancel = () => {
+    // 取消时用**本地最新值**重建，而不是回滚到打开编辑器前的那份快照：
+    // 编辑期间 AI 可能刚产出这条译文，回滚快照会把它抹掉。
+    const cur = (state.fileView.items || []).find((r) => r.id === id)
+      || (state.str.items || []).find((r) => r.id === id)
+      || row;
+    if (cur && cur.translation) {
+      td.innerHTML = `<div class="st-tr-text st-trans" data-no-i18n>${
+        esc(cur.translation)}</div>`;
+    } else {
+      td.innerHTML = original;
+    }
+  };
+  const save = async () => {
+    const ok = await saveInline(id, box.value);
+    if (ok) return;          // 成功后由重绘接管
+    cancel();
+  };
+  td.querySelector('[data-save]').onclick = save;
+  td.querySelector('[data-cancel]').onclick = cancel;
+  box.onkeydown = (ev) => {
+    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); save(); }
+    if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+  };
+}
+
+/* 就地保存一条译文。成功返回 true，并把本地列表与行内文本一起更新。 */
+async function saveInline(id, value) {
+  try {
+    const res = await api('PUT', '/api/strings/' + id, { translation: value });
+    if (res.dry_run) {
+      toast('演练模式：没有写平台。将提交 ' + JSON.stringify(res.would_write));
+      return false;
+    }
+    const item = res.item;
+    if (item) {
+      patchLocalItem(id, item);
+      applyLiveItems([{ id, translation: item.translation, stage: item.stage, status: 'written' }]);
+    }
+    // 平台确认已写但回读失败：不能说"没保存"，也不能假装界面上的值就是平台值
+    toast(res.note ? res.note : '已写入平台');
+    if (String(state.fileView.fid)) loadFileStrings();   // 重拉当前页：阶段/计数才是平台的真相
+    return true;
+  } catch (e) {
+    toast(e.message, true);
+    return false;
+  }
+}
+
+async function loadFileStrings() {
+  const fv = state.fileView;
+  if (!fv.fid) return;
+  const key = fileQueryKey();
+  fv.loading = true;
+  try {
+    const params = new URLSearchParams({
+      page: String(fv.page), page_size: String(fv.size), file: String(fv.fid),
+    });
+    if (fv.stage !== '') params.set('stage', fv.stage);
+    const d = await api('GET', '/api/strings?' + params.toString());
+    fv.items = d.items || [];
+    fv.total = d.total || 0;
+    fv.pages = d.pages || 0;
+    fv.page = d.page || fv.page;
+  } catch (e) {
+    fv.items = [];
+    fv.total = 0;
+    fv.pages = 0;
+    toast(e.message, true);
+  } finally {
+    fv.loading = false;
+    fv.loadedKey = key;
+  }
+  if (state.view === 'files') render();
 }
 
 async function loadFiles(rerender = false) {
@@ -602,6 +900,622 @@ async function loadFiles(rerender = false) {
     state.dirs = dirs || [];
     if (rerender || state.view === 'files') render();
   } catch (e) { toast(e.message, true); }
+}
+
+/* ------------------------------------------------------------------ 词条工作台
+ *
+ * 为什么需要这一页：翻译与校对都是"模型批量改远端数据"，模型会出错。
+ * 没有词条级视图时，人只能在 ParaTranz 网站里逐条翻 —— 出了问题既看不到
+ * 是哪一条，也改不动，只能全盘信任报表。
+ *
+ * 两个入口共用同一份实时数据（`state.live`）：
+ * - 「任务」页顶部的实时面板：AI 此刻在处理哪些词条、产出/被拦/失败各多少；
+ * - 「词条」页：按阶段/文件浏览、改译文、看平台改动记录。
+ */
+const STR_STAGE_NAME = {
+  0: '未翻译', 1: '已翻译', 2: '有疑问', 3: '已检查', 5: '已审核', 9: '锁定', '-1': '隐藏',
+};
+const STR_LIVE_NAME = {
+  running: '处理中', ok: '已产出', tm: '记忆命中', blocked: '被拦', failed: '失败',
+  written: '已写入', ended: '未回结果',
+  pass: '校对通过', dispute: '打回', reset: '重置未翻译', skip: '未判定',
+};
+/* 校对结果 → 阶段徽章（写回事件自带 stage 时以它为准） */
+const LIVE_STATUS_STAGE = { pass: 3, dispute: 2, reset: 0 };
+
+/* 截断不能切在代理对中间：emoji/增补平面字符会被切成半个（显示成 ���） */
+function clip(text, n) {
+  const arr = Array.from(String(text == null ? '' : text));
+  return arr.length > n ? arr.slice(0, n).join('') + '…' : arr.join('');
+}
+
+function stageTag(stage) {
+  const v = Number(stage);
+  const cls = v === 1 ? 'ok' : (v === 2 ? 'w' : '');
+  return `<span class="tag ${cls}">${esc(STR_STAGE_NAME[v] || String(stage))}</span>`;
+}
+
+/* 文件路径只留末两级：真实项目里 `main.csv` 可能有几十个同名，
+ * 只显示文件名等于没显示；显示全路径又会把表格挤变形。 */
+function strFileTail(name) {
+  const parts = String(name || '').split('/').filter(Boolean);
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : parts.join('/');
+}
+
+/* 实时面板：优先显示"处理中"，再补最近有结果的，两类都只留 10 条 —— 面板要一眼看完 */
+function livePanel() {
+  // 按 ts 排序再取尾部：Map 的插入序不会因为值更新而移动，
+  // 直接 slice(-10) 拿到的是"最晚首次出现的 10 个 id"，不是最近更新的 10 条。
+  const all = [...state.live.values()].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  if (!all.length) return '';
+  const cnt = {};
+  all.forEach((x) => { cnt[x.status] = (cnt[x.status] || 0) + 1; });
+  const running = all.filter((x) => x.status === 'running').slice(-10);
+  const rest = all.filter((x) => x.status !== 'running').slice(-10).reverse();
+  const rows = running.concat(rest);
+  return `<div class="card tight" id="liveStrip">
+    <div style="display:flex;gap:10px;align-items:center;padding:8px 10px;flex-wrap:wrap">
+      <b>AI 正在处理的词条</b>
+      <span class="muted" style="font-size:11.5px">${
+        ['running', 'ok', 'tm', 'blocked', 'failed', 'written', 'ended']
+          .filter((k) => cnt[k])
+          .map((k) => `${STR_LIVE_NAME[k]} ${cnt[k]}`).join(' · ') || '等待模型返回…'}</span>
+      <div class="spacer"></div>
+      <span class="dim mono" style="font-size:11px">${esc(state.liveJob || '')}</span>
+    </div>
+    <table>
+      <thead><tr><th style="width:16%">状态</th><th>原文</th><th>模型产出 / 原因</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr data-sid="${esc(r.id)}" style="cursor:pointer">
+        <td style="white-space:nowrap"><span class="tag ${r.status === 'failed' || r.status === 'blocked'
+          ? 'w' : (r.status === 'written' || r.status === 'ok' ? 'ok' : '')}"
+          >${esc(STR_LIVE_NAME[r.status] || r.status)}${r.dry_run ? '（演练）' : ''}</span></td>
+        <td style="font-size:12px"><span data-no-i18n>${esc(clip(r.original, 90))}</span></td>
+        <td style="font-size:12px">${r.translation
+          ? `<span data-no-i18n>${esc(clip(r.translation, 90))}</span>`
+          : `<span class="dim">${esc(clip(r.reason || '—', 60))}</span>`}${
+          r.translation && r.reason ? ` <span class="dim">（${esc(clip(r.reason, 40))}）</span>` : ''}</td>
+      </tr>`).join('')}</tbody>
+    </table>
+  </div>`;
+}
+
+/* 收到逐条事件：只换面板内容，不整页重绘（否则滚动位置、展开状态全丢） */
+function pushItems(jobId, items, ts) {
+  if (!Array.isArray(items)) return;
+  // 换任务了就把上一轮清掉：否则上个任务遗留的 running 会永远占着展示位，
+  // 右上角的 job id 却已经是新的，数字和 id 对不上。
+  if (jobId && jobId !== state.liveJob) {
+    state.live.clear();
+    state.liveJob = jobId;
+  }
+  items.forEach((it) => {
+    const id = Number(it && it.id);
+    if (!Number.isFinite(id)) return;   // 畸形 id 不进 Map，避免 NaN 行与重复行
+    const prev = state.live.get(id) || {};
+    state.live.set(id, { ...prev, ...it, id, ts: ts || Date.now() / 1000 });
+  });
+  // 面板只显示最近一段，超出的老条目清掉，避免长任务把内存与渲染拖垮
+  if (state.live.size > 400) {
+    const ordered = [...state.live.entries()].sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
+    ordered.slice(0, state.live.size - 400).forEach(([k]) => state.live.delete(k));
+  }
+  applyLiveItems(items);   // 词条列表/文件视图就地刷新
+  paintLive();
+}
+
+/* 把 AI 的产出/判定就地写回已渲染的词条行（不重绘整页）。
+ *
+ * 为什么必须就地补：翻译/校对是几百秒的长任务，等它跑完再重绘，用户在整个过程里
+ * 看不到任何变化；而整页重绘会丢掉滚动位置、展开状态，还打断正在输入的文本框。
+ */
+function applyLiveItems(items) {
+  if (!Array.isArray(items)) return;
+  items.forEach((it) => {
+    const id = Number(it && it.id);
+    if (!Number.isFinite(id)) return;
+    // 本地数据也要跟着变，否则翻页/重绘后这些结果又"消失"了
+    patchLocalItem(id, it);
+
+    const rows = document.querySelectorAll(`[data-sid="${id}"]`);
+    rows.forEach((row) => {
+      // 演练模式：模型产出了，但平台没变 —— 只显示状态，绝不改列表里的译文与阶段
+      if (it.dry_run) {
+        const chipDry = row.querySelector('.st-live');
+        if (chipDry) {
+          chipDry.textContent = (STR_LIVE_NAME[it.status] || it.status || '') + '（演练）';
+          chipDry.className = 'tag st-live';
+          if (it.translation) chipDry.title = '预览：' + it.translation;
+        }
+        return;
+      }
+      const box = row.querySelector('[data-edit]');
+      // 用户正在改这一格时绝不覆盖他的输入
+      if (box && document.activeElement !== box && typeof it.translation === 'string'
+          && it.translation) {
+        box.value = it.translation;
+        box.dataset.dirty = '';
+      }
+      // **只动译文格**：querySelector('.st-tr-text') 取到的是第一个（原文），
+      // 实测会把产出写进原文列、把原文冲掉。
+      const cell = row.querySelector('.st-trans');
+      if (cell && typeof it.translation === 'string' && it.translation) {
+        cell.textContent = it.translation;
+      }
+      const stage = it.stage != null ? Number(it.stage) : LIVE_STATUS_STAGE[it.status];
+      const badge = row.querySelector('.st-stage');
+      if (badge && stage != null && !Number.isNaN(stage)) {
+        badge.outerHTML = `<span class="st-stage">${stageTag(stage)}</span>`;
+      }
+      const chip = row.querySelector('.st-live');
+      if (chip) {
+        chip.textContent = STR_LIVE_NAME[it.status] || it.status || '';
+        chip.className = 'tag st-live ' + (it.status === 'dispute' || it.status === 'failed'
+          || it.status === 'blocked' ? 'w' : 'ok');
+        if (it.reason) chip.title = it.reason;
+      }
+    });
+  });
+}
+
+/* 同步到本地列表（词条页 / 文件页各有一份） */
+function patchLocalItem(id, it) {
+  if (it.dry_run) return;        // 演练的预览不进本地数据
+  const stage = it.stage != null ? Number(it.stage) : LIVE_STATUS_STAGE[it.status];
+  [state.str.items, state.fileView.items].forEach((arr) => {
+    const row = (arr || []).find((r) => r.id === id);
+    if (!row) return;
+    if (typeof it.translation === 'string' && it.translation) row.translation = it.translation;
+    if (stage != null && !Number.isNaN(stage)) row.stage = stage;
+  });
+}
+
+/* 任务进入终态后，仍挂在"处理中"的条目要给个说法（否则永远在飞） */
+function settleLive(status) {
+  let changed = false;
+  state.live.forEach((v, k) => {
+    if (v.status !== 'running') return;
+    state.live.set(k, {
+      ...v, status: 'ended',
+      reason: v.reason || `任务已结束（${status}），这一条没有收到结果`,
+    });
+    changed = true;
+  });
+  if (changed) paintLive();
+}
+
+function paintLive() {
+  const host = $('#liveHost');
+  if (!host) return;
+  host.innerHTML = livePanel();       // 没有数据时就是空，锚点仍在，首条事件不会丢
+  bindLiveAndRows(host);
+}
+
+async function renderStrings(main) {
+  const ep = renderEpoch;
+  const s = state.str;
+  // 判据用「这批数据是哪个查询条件拉回来的」，不能用 items.length===0。
+  // 后者在"查无结果 / 请求失败"时会反复触发拉取（render 里又 render），变成自激循环。
+  if (s.loadedKey !== strQueryKey() && !s.loading) {
+    await loadStrings();
+    if (ep !== renderEpoch) return;
+  }
+  const files = state.files || [];
+  const q = s.q.trim().toLowerCase();
+  const shown = q
+    ? s.items.filter((r) => (r.original + '\u0000' + r.translation).toLowerCase().includes(q))
+    : s.items;
+
+  main.innerHTML = `
+    ${pageHead('词条',
+      `${s.total} 条 · 第 ${s.page} / ${s.pages || 1} 页 · 点任意行查看原文、上下文与处理记录`,
+      '<button class="btn" id="stRefresh">刷新</button>')}
+    <div id="liveHost">${livePanel()}</div>
+    <div id="batchHost">${batchBarHtml()}</div>
+    <div class="card">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select class="field" id="stStage" style="width:132px">
+          ${['0', '1', '2', '3', '5', '9', ''].map((v) => `<option value="${v}"${
+            s.stage === v ? ' selected' : ''}>${v === '' ? '全部阶段' : STR_STAGE_NAME[v]}</option>`).join('')}
+        </select>
+        <select class="field" id="stFile" style="width:300px">
+          <option value="">全部文件</option>
+          ${files.map((f) => `<option value="${f.id}"${
+            String(s.file) === String(f.id) ? ' selected' : ''}>${esc(f.name)}（待翻 ${f.pending}）</option>`).join('')}
+        </select>
+        <select class="field" id="stSize" style="width:104px">
+          ${[25, 50, 100, 200].map((n) => `<option value="${n}"${
+            s.size === n ? ' selected' : ''}>${n} 条/页</option>`).join('')}
+        </select>
+        <input class="field" id="stQ" placeholder="在本页内过滤原文/译文" style="width:200px"
+          value="${esc(s.q)}">
+        <span class="dim" id="stFilterInfo" style="font-size:11.5px"></span>
+        <div class="spacer"></div>
+        <button class="btn" id="stPrev"${s.page <= 1 ? ' disabled' : ''}>上一页</button>
+        <button class="btn" id="stNext"${s.page >= (s.pages || 1) ? ' disabled' : ''}>下一页</button>
+      </div>
+    </div>
+    ${state.detail ? strDetailHtml(state.detail) : ''}
+    <div class="card tight" id="stTable">
+      ${shown.length ? `<table>
+        <thead><tr><th style="width:30px"><input type="checkbox" id="stPickAll"></th>
+          <th style="width:40%">原文</th><th style="width:38%">译文</th>
+          <th style="width:96px">阶段</th><th>文件</th></tr></thead>
+        <tbody>${shown.map((r) => `<tr data-sid="${esc(r.id)}"
+          data-q="${esc((r.original + '\u0000' + r.translation).toLowerCase())}"
+          style="cursor:pointer${String(state.detailId) === String(r.id) ? ';background:var(--panel-2)' : ''}">
+          <td><input type="checkbox" data-pick="${esc(r.id)}"${
+            state.batch.has(Number(r.id)) ? ' checked' : ''}></td>
+          <td style="font-size:12px"><span class="st-orig" data-no-i18n>${
+            esc(clip(r.original, 200))}</span></td>
+          <td style="font-size:12px">${r.translation
+            ? `<span class="st-trans" data-no-i18n>${esc(clip(r.translation, 200))}</span>`
+            : '<span class="dim st-trans">（空）</span>'}</td>
+          <td style="white-space:nowrap"><span class="st-stage">${stageTag(r.stage)}</span></td>
+          <td class="mono dim" style="font-size:11px" data-no-i18n>${esc(strFileTail(r.file_name))}</td>
+        </tr>`).join('')}</tbody>
+      </table>`
+      : `<div class="empty">${
+          s.loading ? '读取中…'
+          : (q ? '本页没有匹配的条目（平台不支持全库搜索，只能在这里过滤当前页）'
+               : '这个条件下没有词条。换阶段或文件再看')}</div>`}
+    </div>`;
+
+  $('#stRefresh').onclick = async () => {
+    closeDetail();
+    s.loadedKey = '';          // 强制重拉（否则 key 没变就不会再请求）
+    await loadStrings();
+  };
+  const reload = (patch) => {
+    Object.assign(s, patch);
+    closeDetail();
+    state.batch.clear();     // 换页/换筛选就清空选择：别让批量操作打到看不见的条目上
+    return loadStrings();
+  };
+  $('#stStage').onchange = (e) => reload({ stage: e.target.value, page: 1 });
+  $('#stFile').onchange = (e) => reload({ file: e.target.value, page: 1 });
+  $('#stSize').onchange = (e) => reload({ size: Number(e.target.value) || 50, page: 1 });
+  // 过滤只动 DOM，不重绘整页：重绘会重建输入框 → 打一个字就失焦，根本没法连续输入
+  const qBox = $('#stQ');
+  if (qBox) {
+    qBox.oninput = () => {
+      s.q = qBox.value;
+      filterStringsRows(s.q);
+    };
+    if (s.q) filterStringsRows(s.q);
+  }
+  $('#stPrev').onclick = () => reload({ page: Math.max(1, s.page - 1) });
+  $('#stNext').onclick = () => reload({ page: s.page + 1 });
+  bindLiveAndRows(main);
+  bindDetail(main);
+  bindBatch(main);
+}
+
+/* 只筛 DOM，不重绘：重绘会重建输入框（打一个字就失焦）。
+ * 范围限定在词条表内 —— 实时面板的行也带 data-sid，不能被一起隐藏。
+ * 匹配只认原文/译文（data-q），不拼 tr.textContent：后者会把阶段标签与文件名
+ * 也算进去，搜「已翻译」或「main」时结果完全不是用户要的。 */
+function filterStringsRows(q) {
+  const box = $('#stTable');
+  if (!box) return;
+  const k = String(q || '').trim().toLowerCase();
+  let n = 0;
+  box.querySelectorAll('tbody tr').forEach((tr) => {
+    const hit = !k || String(tr.dataset.q || '').includes(k);
+    tr.style.display = hit ? '' : 'none';
+    if (hit) n++;
+  });
+  const info = $('#stFilterInfo');
+  if (info) info.textContent = k ? `本页匹配 ${n} 条` : '';
+}
+
+/* ---------- 批量操作 ----------
+ *
+ * 校对打回、术语统一、误译清理都是成片的活儿，逐条点会把一下午的活干成三天；
+ * 平台侧本来就是批量接口。选择集放在 `state.batch`（两页共用一套按钮实现），
+ * 换页/换筛选就清空 —— 免得"以为选的是这一页，实际操作了上一页的条目"。
+ */
+function batchBarHtml() {
+  const n = state.batch.size;
+  if (!n) return '';
+  const stageBtns = [[1, '已翻译'], [2, '有疑问'], [3, '已检查'], [5, '已审核'], [0, '未翻译']]
+    .map(([v, label]) => `<button class="btn sm" data-bstage="${v}">标为${label}</button>`).join('');
+  return `<div class="card" id="batchBar"
+      style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <b>已选 ${n} 条</b>
+    <span class="dim" style="font-size:11.5px">批量操作会直接改平台数据</span>
+    <div class="spacer"></div>
+    ${stageBtns}
+    <button class="btn sm" data-bclear="1">清空译文</button>
+    <button class="btn sm primary" data-bretrans="1">重译选中</button>
+    <button class="btn sm" data-bnone="1">取消选择</button>
+  </div>`;
+}
+
+function paintBatchBar() {
+  const host = $('#batchHost');
+  if (!host) return;
+  host.innerHTML = batchBarHtml();
+  bindBatchActions();
+}
+
+function bindBatchActions() {
+  const host = $('#batchHost');
+  if (!host) return;
+  host.querySelectorAll('[data-bstage]').forEach((b) => {
+    b.onclick = () => batchApply('stage', Number(b.dataset.bstage));
+  });
+  const clr = host.querySelector('[data-bclear]');
+  if (clr) clr.onclick = () => batchApply('clear');
+  const rt = host.querySelector('[data-bretrans]');
+  if (rt) rt.onclick = batchRetranslate;
+  const none = host.querySelector('[data-bnone]');
+  if (none) {
+    none.onclick = () => {
+      state.batch.clear();
+      render();
+    };
+  }
+}
+
+function bindBatch(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-pick]').forEach((box) => {
+    // 勾选不能顺带把详情卡打开：这一格在可点击的行里
+    box.onclick = (ev) => ev.stopPropagation();
+    box.onchange = () => {
+      const id = Number(box.dataset.pick);
+      if (box.checked) state.batch.add(id);
+      else state.batch.delete(id);
+      paintBatchBar();
+    };
+  });
+  const all = root.querySelector('#stPickAll') || root.querySelector('#fpPickAll');
+  if (all) {
+    all.onclick = (ev) => ev.stopPropagation();
+    all.onchange = () => {
+      // 本地过滤隐藏的行不参与全选：否则"过滤后点全选"会批量改到看不见的条目
+      const boxes = [...root.querySelectorAll('[data-pick]')]
+        .filter((box) => box.offsetParent !== null);
+      boxes.forEach((box) => {
+        const id = Number(box.dataset.pick);
+        box.checked = all.checked;
+        if (all.checked) state.batch.add(id);
+        else state.batch.delete(id);
+      });
+      paintBatchBar();
+    };
+  }
+  bindBatchActions();
+}
+
+async function batchApply(action, stage) {
+  const ids = [...state.batch];
+  if (!ids.length) return;
+  const what = action === 'clear'
+    ? '清空译文并退回「未翻译」'
+    : `标为「${STR_STAGE_NAME[stage] || stage}」`;
+  if (!(await askConfirm(`要对选中的 ${ids.length} 条${what}？这会修改平台上的数据。`))) return;
+  try {
+    const res = await api('POST', '/api/strings/batch', { ids, action, stage });
+    if (res.dry_run) {
+      toast(`演练模式：未写平台（待提交 ${res.count} 条）`);
+      return;
+    }
+    toast(`已提交 ${res.count} 条，平台确认 ${res.confirmed} 条`);
+    state.batch.clear();
+    if (state.view === 'files') await loadFileStrings();
+    else await loadStrings();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function batchRetranslate() {
+  const ids = [...state.batch];
+  if (!ids.length) return;
+  const ok = await askConfirm(
+    `把选中的 ${ids.length} 条交给模型重翻？`
+    + '这些条目**已有的译文会被覆盖**（点名重翻不走"保护人工译文"）。'
+  );
+  if (!ok) return;
+  try {
+    const { job } = await api('POST', '/api/jobs',
+      { tool: 'translate', args: { ids, limit: ids.length } });
+    toast(`已提交重翻任务 ${job.id}（结果会实时刷到列表里）`);
+    state.batch.clear();
+    render();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* 行点击 / 实时面板行点击统一走这里：data-sid → 打开详情 */
+function bindLiveAndRows(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-sid]').forEach((el) => {
+    el.onclick = () => openString(Number(el.dataset.sid));
+  });
+}
+
+function strDetailHtml(d) {
+  const it = d.item || {};
+  // history 缺失时不能直接 .length：函数抛错会让整页停在上一帧
+  const hist = Array.isArray(d.history) ? d.history : [];
+  const local = Array.isArray(d.local_history) ? d.local_history : [];
+  const stageBtns = [['标记已翻译', 1], ['标记有疑问', 2], ['标记已检查', 3], ['标记已审核', 5]]
+    .map(([label, v]) => `<button class="btn sm" data-stage="${v}">${label}</button>`).join('');
+  return `<div class="card" id="stDetail">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b class="mono">#${esc(it.id)}</b>${stageTag(it.stage)}
+      <span class="mono dim" style="font-size:11.5px" data-no-i18n>${esc(it.file_name)}</span>
+      <div class="spacer"></div>
+      <button class="btn sm" id="stClose">关闭</button>
+    </div>
+    <div class="muted" style="margin-top:10px;font-size:11.5px">原文</div>
+    <div style="white-space:pre-wrap;font-size:13px;line-height:1.55"
+      ><span data-no-i18n>${esc(it.original)}</span></div>
+    ${it.context ? `<div class="muted" style="margin-top:10px;font-size:11.5px">上下文</div>
+      <pre class="result" style="max-height:120px;overflow:auto" data-no-i18n>${esc(it.context)}</pre>` : ''}
+    <div class="muted" style="margin-top:10px;font-size:11.5px">译文（改完点保存，直接写回平台）</div>
+    <textarea class="field" id="stTr" data-no-i18n
+      style="min-height:88px;margin-top:4px;font-size:13px">${esc(it.translation)}</textarea>
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn primary" id="stSave">保存译文</button>
+      ${stageBtns}
+      <div class="spacer"></div>
+      <span class="dim" style="font-size:11px">演练模式开启时只回显、不落平台</span>
+    </div>
+    <div class="muted" style="margin-top:12px;font-size:11.5px">
+      本机处理记录（${local.length} 条）—— 我们的流水线对这条做过什么</div>
+    ${local.length ? `<table>
+      <thead><tr><th style="width:130px">时间</th><th style="width:90px">环节</th>
+        <th style="width:90px">动作</th><th>备注</th></tr></thead>
+      <tbody>${local.map((h) => `<tr>
+        <td class="dim" style="font-size:11px">${fmtTime(h.ts)}</td>
+        <td style="font-size:12px">${esc(h.pipeline || '—')}</td>
+        <td style="font-size:12px">${esc(h.action || '—')}</td>
+        <td class="dim" style="font-size:11.5px" data-no-i18n>${esc(h.detail || '')}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<div class="empty">本机还没有处理过这条</div>'}
+    <div class="muted" style="margin-top:12px;font-size:11.5px">
+      平台人工改动记录（${hist.length} 条）</div>
+    <div class="dim" style="font-size:11px;margin-top:2px">
+      平台只记录网页端的人工操作；通过 API 批量写回（含本软件）不会出现在这个列表里。
+    </div>
+    ${hist.length ? `<table>
+      <thead><tr><th style="width:120px">时间</th><th style="width:110px">操作人</th>
+        <th>从</th><th>到</th></tr></thead>
+      <tbody>${hist.map((h) => `<tr>
+        <td class="dim" style="font-size:11px">${esc(String(h.at || '').replace('T', ' ').slice(0, 19))}</td>
+        <td style="font-size:12px" data-no-i18n>${esc(h.user || '—')}</td>
+        <td style="font-size:12px" data-no-i18n>${esc(clip(h.before, 80))}</td>
+        <td style="font-size:12px" data-no-i18n>${esc(clip(h.after, 80))}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<div class="empty">这条还没有改动记录</div>'}
+  </div>`;
+}
+
+function bindDetail(main) {
+  const close = $('#stClose');
+  if (close) {
+    close.onclick = closeDetail;
+  }
+  const save = $('#stSave');
+  if (save) save.onclick = () => saveTranslation(main);
+  main.querySelectorAll('[data-stage]').forEach((b) => {
+    b.onclick = () => saveTranslation(main, Number(b.dataset.stage));
+  });
+}
+
+/* 当前查询条件的指纹：用于判断"手上这批数据是不是这个条件下的" */
+function strQueryKey() {
+  const s = state.str;
+  return `${s.page}|${s.size}|${s.stage}|${s.file}`;
+}
+
+async function loadStrings() {
+  const s = state.str;
+  const key = strQueryKey();
+  s.loading = true;
+  try {
+    const params = new URLSearchParams({ page: String(s.page), page_size: String(s.size) });
+    if (s.stage !== '') params.set('stage', s.stage);
+    if (s.file) params.set('file', String(s.file));
+    const d = await api('GET', '/api/strings?' + params.toString());
+    s.items = d.items || [];
+    s.total = d.total || 0;
+    s.pages = d.pages || 0;
+    s.page = d.page || s.page;
+  } catch (e) {
+    // 失败也要记 loadedKey：否则 renderStrings 会认为"没加载过"而立刻再拉一次，
+    // 401/断网时就是无限请求 + 无限弹窗
+    s.items = [];
+    s.total = 0;
+    s.pages = 0;
+    s.err = e.message;
+    toast(e.message, true);
+  } finally {
+    s.loading = false;
+    s.loadedKey = key;
+  }
+  if (state.view === 'strings') render();
+}
+
+/* 详情请求序号：连点两行时，慢响应后到不能把详情卡改成上一条 */
+let detailSeq = 0;
+
+function closeDetail() {
+  state.detail = null;
+  state.detailId = null;
+}
+
+/* 详情接口失败时降级用：从已加载的列表里找那条 */
+function findLoaded(id) {
+  return (
+    [...(state.str.items || []), ...(state.fileView.items || [])].find((r) => r.id === id) || null
+  );
+}
+
+async function openString(id) {
+  const my = ++detailSeq;
+  state.detailId = id;
+  let d;
+  try {
+    d = await api('GET', '/api/strings/' + id);
+  } catch (e) {
+    // 详情拿不到不影响列表：把已加载的那条降级显示，同时明确提示
+    d = { item: findLoaded(id) || { id }, history: [], local_history: [] };
+    toast(e.message, true);
+  }
+  if (my !== detailSeq) return;     // 期间用户又点了别的行
+  state.detail = d;
+  render();
+  const box = $('#stDetail');
+  if (box) box.scrollIntoView({ block: 'nearest' });
+}
+
+/* 保存译文 / 改阶段：同一个 PUT 入口。成功后就地刷新该行（用平台回读的值） */
+async function saveTranslation(main, stage) {
+  const d = state.detail;
+  if (!d || !d.item) return;
+  const body = {};
+  if (stage == null) {
+    const el = $('#stTr');
+    // 取不到输入框时**绝不能**提交空串：那等于把平台上的译文清空。
+    if (!el) {
+      toast('译文输入框已不在页面上，请重新点开这条再改', true);
+      return;
+    }
+    body.translation = el.value;
+  } else {
+    body.stage = stage;
+  }
+  try {
+    const res = await api('PUT', '/api/strings/' + d.item.id, body);
+    if (res.dry_run) {
+      toast('演练模式：没有写平台。将提交 ' + JSON.stringify(res.would_write));
+      return;
+    }
+    // 用平台回读的结果覆盖本地，绝不把"我们提交的"当"平台已存的"
+    const item = res.item || d.item;
+    patchLocalItem(item.id, item);
+    applyLiveItems([{ id: item.id, translation: item.translation, stage: item.stage,
+                      status: 'written' }]);
+    // "还在不在当前页"要按**当前视图**判断：词条页看 state.str，文件页看 state.fileView
+    const list = state.view === 'files' ? state.fileView.items : state.str.items;
+    if (!(list || []).some((r) => r.id === item.id)) {
+      // 保存期间用户翻了页/改了筛选：别把一条不属于当前页的词条重新做成详情卡
+      closeDetail();
+      render();
+      toast('已写入平台（该条已不在当前筛选结果里）');
+      return;
+    }
+    toast('已写入平台');
+    // 重新拉一次详情：平台改动记录里必须能看到这一次修改（否则"记录"是假的）
+    await openString(item.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 /* ------------------------------------------------------------------ 工具 */
@@ -832,17 +1746,49 @@ async function saveSettings() {
     const h = await api('GET', '/api/health');
     state.health = h;
     state.llmReady = !!h.llm;
+    // 换了项目/Token 之后，词条页手上那批数据属于上一个项目 ——
+    // 不清掉的话"词条"页会继续显示旧项目的条目（还点得开、还能改）
+    resetStringsState();
     await refreshAll();
   } catch (e) {
     toast(e.message, true);
   }
 }
 
+/* 词条页的筛选/分页/详情全部回到初始状态（切项目、切语言等场景用） */
+function resetStringsState() {
+  Object.assign(state.str, {
+    page: 1, items: [], total: 0, pages: 0, sel: null, detail: null,
+    loading: false, loadedKey: '', q: '',
+  });
+  Object.assign(state.fileView, {
+    page: 1, items: [], total: 0, pages: 0, loadedKey: '', q: '', loading: false,
+  });
+  closeDetail();
+}
+
 async function testSettings() {
   const out = $('#testResult');
+  const btn = $('#testSettings');
   out.textContent = '测试中…';
+  btn.disabled = true;
+  // 测**界面上正在填的值**：以前这个请求不带参数，后端读的是已保存的配置，
+  // 于是「改了编号没保存就点测试」测的是上一次的编号 —— 报错与眼前的输入对不上账。
+  const body = {
+    project_id: Number($('#s_project').value) || 0,
+    base_url: $('#s_base').value.trim(),
+    token: $('#s_token').value.trim(),
+  };
   try {
-    const r = await api('POST', '/api/settings/test');
+    const r = await api('POST', '/api/settings/test', body);
+    if (!r.ok) {
+      const hint = (r.hints || []).map((h) => '· ' + esc(h)).join('<br>');
+      out.innerHTML = `<span style="color:var(--err)">✗ ${esc(r.error || '连接失败')}</span>` +
+        (r.url ? `<div class="muted" style="font-size:11.5px;margin-top:2px">请求：${esc(r.url)}</div>` : '') +
+        (hint ? `<div style="color:var(--warn);margin-top:4px;line-height:1.5">${hint}</div>` : '');
+      setConn(false, '连接失败');
+      return;
+    }
     const p = r.project;
     out.innerHTML = `<span style="color:var(--ok)">✓ ${esc(p.name)}</span>
       · ${esc(p.source)}→${esc(p.dest)} · ${p.members} 名成员`;
@@ -855,6 +1801,8 @@ async function testSettings() {
   } catch (e) {
     out.innerHTML = `<span style="color:var(--err)">✗ ${esc(e.message)}</span>`;
     setConn(false, '连接失败');
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -2493,7 +3441,11 @@ async function showExtractionDetail(main, jid) {
         }
       };
 
-      $('#up_do', el).onclick = async () => {
+      $('#up_do', el).onclick = async (ev) => {
+        // 连点会提交两个 job（第二个把第一个的结果覆盖掉，看着像"上传成功但没生效"）
+        const btn = ev.currentTarget;
+        if (btn.disabled) return;
+        btn.disabled = true;
         $('#up_msg', el).textContent = t('上传中…');
         try {
           const r = await api('POST', `/api/extractions/${jid}/upload`, payload());
@@ -2502,6 +3454,7 @@ async function showExtractionDetail(main, jid) {
             + t('，跑完自动加载结果…')
             + ((state.settings || {}).dry_run ? t('（演练模式：只算不写）') : ''));
         } catch (e) {
+          btn.disabled = false;
           $('#up_msg', el).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
         }
       };
@@ -2584,7 +3537,10 @@ async function showExtractionDetail(main, jid) {
         }
       };
 
-      $('#imp_do', el).onclick = async () => {
+      $('#imp_do', el).onclick = async (ev) => {
+        const btn = ev.currentTarget;
+        if (btn.disabled) return;   // 同上传：连点会提交两个 job
+        btn.disabled = true;
         $('#imp_msg', el).textContent = '导入中…';
         try {
           const r = await api('POST', `/api/extractions/${jid}/import`, payload());
@@ -2594,6 +3550,7 @@ async function showExtractionDetail(main, jid) {
           toast(`已提交导入任务 ${r.job ? r.job.id : ''}，跑完自动加载结果…`
             + ((state.settings || {}).dry_run ? '（演练模式：只算不写）' : ''));
         } catch (e) {
+          btn.disabled = false;
           $('#imp_msg', el).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
         }
       };
@@ -2699,6 +3656,7 @@ function wbReportHtml(r) {
       <div class="dim" style="font-size:11.5px;margin-top:6px">
         其余没写的：无原文 <b>${num('skipped_no_original')}</b>
         · 平台无此 key <b>${num('skipped_untracked')}</b>
+        · 有疑问（校对打回） <b>${num('skipped_disputed')}</b>
         · 格式未支持 <b>${num('unsupported')}</b>
         · 失败文件 <b>${num('failed_files')}</b>
         <span style="opacity:.75">（条目数 / 文件数）</span>

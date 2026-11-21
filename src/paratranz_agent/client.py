@@ -35,15 +35,47 @@ DEFAULT_UA = "paratranz-agent/0.1 (+https://paratranz.cn)"
 # 平台限制：批量词条操作单次上限
 BATCH_LIMIT = 500
 TASK_STRING_LIMIT = 1000
+# 平台任务标题上限（plan 侧按这个预算生成标题，client 只做最后一道校验）
+TITLE_LIMIT = 128
+
+
+def _bounded_title(title: str) -> str:
+    t = str(title)
+    if len(t) > TITLE_LIMIT:
+        raise ValueError(
+            f"任务标题 {len(t)} 字符，超过平台上限 {TITLE_LIMIT}，请调用方先截断"
+        )
+    return t
 
 
 class ParaTranzError(RuntimeError):
-    def __init__(self, status: int, message: str, path: str, request_id: str | None = None):
+    """平台调用失败。
+
+    `path` 必须是**已替换 projectId** 的真实路径，`url` 是拼上 base_url 的绝对地址。
+
+    两者以前都只留模板（`/projects/{projectId}`），后果很实际：用户按提示看到
+    `[404] /projects/{projectId}: Not Found`，既不知道打的是哪个项目，也不知道
+    实际请求了哪个地址 —— 而平台对「项目不存在」「私有项目未加入」「Token 无效」
+    三种情况**返回的是同一个 404 "Not Found"**，不给地址和编号就完全无法自诊。
+    """
+
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        path: str,
+        request_id: str | None = None,
+        *,
+        url: str = "",
+    ):
         self.status = status
         self.message = message
         self.path = path
+        self.url = url
         self.request_id = request_id
-        super().__init__(f"[{status}] {path}: {message}" + (f" (id={request_id})" if request_id else ""))
+        super().__init__(
+            f"[{status}] {path}: {message}" + (f" (id={request_id})" if request_id else "")
+        )
 
 
 class RateLimiter:
@@ -78,26 +110,35 @@ class RateLimiter:
             time.sleep(min(wait, 5.0))
 
 
-def unwrap_page(data: Any, *, path: str = "") -> list[Any]:
+def unwrap_page_meta(data: Any, *, path: str = "") -> tuple[list[Any], dict[str, Any]]:
     """平台分页接口返回 `{results, page, pageSize, rowCount, pageCount}`。
 
-    `/files` 等少数接口直接返回裸数组。这里统一成 list，
+    `/files` 等少数接口直接返回裸数组。这里统一成 `(list, meta)`，
     否则 `for x in data` 会遍历到字典的 key（真实踩过：
     status 崩在 `StringItem.model_validate('results')`）。
 
     **认不出来的形状要报错，不能返回空列表**：空列表在下游等价于「这个项目
     一条数据都没有」，于是平台一改 envelope 字段名，界面就显示「0 条词条」
-    而不是「客户端不认这个响应」。空字典/None 才是真的没有数据。
+    而不是「客户端不认这个响应」。空字典才是真的没有数据。
+
+    `meta` 只有在外层确实是分页包时才非空（裸数组 → `{}`）。它的用途是
+    **判断到底**：只靠「这一页不足 pageSize」会被平台压低 pageSize 骗过去
+    （见 `iter_strings`），`pageCount` 才是平台自己的说法。
     """
     if isinstance(data, list):
-        return data
-    if data is None or (isinstance(data, dict) and not data):
-        return []
+        return data, {}
+    if isinstance(data, dict) and not data:
+        return [], {}
     if isinstance(data, dict):
         for key in ("results", "items", "data", "rows"):
             v = data.get(key)
             if isinstance(v, list):
-                return v
+                meta = {
+                    k: data[k]
+                    for k in ("page", "pageSize", "rowCount", "pageCount")
+                    if isinstance(data.get(k), int)
+                }
+                return v, meta
         raise ParaTranzError(
             0,
             "无法识别的列表响应（键：" + "、".join(sorted(map(str, data)))[:120] + "）",
@@ -106,6 +147,11 @@ def unwrap_page(data: Any, *, path: str = "") -> list[Any]:
     raise ParaTranzError(
         0, f"无法识别的响应类型：{type(data).__name__}", path or "(unknown)"
     )
+
+
+def unwrap_page(data: Any, *, path: str = "") -> list[Any]:
+    """只要列表的便捷包装（唯一实现仍是 `unwrap_page_meta`）。"""
+    return unwrap_page_meta(data, path=path)[0]
 
 
 def _unwrap_file(data: Any) -> dict:
@@ -165,6 +211,38 @@ def _edit_result(res: Any, part: Sequence[dict]) -> tuple[list[int], int]:
     raise ParaTranzError(0, f"批量写回响应形状无法识别：{str(res)[:200]}", "/strings")
 
 
+def _error_payload(resp: httpx.Response) -> dict[str, Any]:
+    try:
+        data = resp.json()
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+# 平台不同端点的错误体字段名不统一（`message` / `error` / `detail`）
+_ERROR_KEYS = ("message", "error", "detail")
+
+
+def _error_message(resp: httpx.Response) -> str:
+    """从错误响应里取人能看懂的一句话。
+
+    以前只读 `message` 键：平台回 `{"error": ...}` 时异常消息是空串，
+    用户看到的是 `[422] /projects/1/strings: `（冒号后面什么都没有）。
+    """
+    payload = _error_payload(resp)
+    for key in _ERROR_KEYS:
+        v = payload.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:300]
+    text = (resp.text or "").strip().replace("\n", " ")
+    return text[:300] or f"HTTP {resp.status_code}"
+
+
+def _error_id(resp: httpx.Response) -> str | None:
+    rid = _error_payload(resp).get("id")
+    return str(rid) if isinstance(rid, (str, int)) and str(rid) else None
+
+
 class ParaTranzClient:
     def __init__(
         self,
@@ -181,6 +259,9 @@ class ParaTranzClient:
         self.base_url = base_url.rstrip("/")
         self.limiter = RateLimiter(rate_limit_per_min)
         self._suggest_lock = threading.Lock()
+        # 自定义 transport（测试/假平台）要能被`_get_anonymous` 复用，
+        # 否则自诊的匿名探测会真的出网，单测也跟着成网络测试
+        self._transport = transport
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=timeout,
@@ -206,6 +287,11 @@ class ParaTranzClient:
     def _url(self, path: str) -> str:
         return path.replace("{projectId}", str(self.project_id))
 
+    def _abs_url(self, url: str) -> str:
+        """已解析路径 → 绝对地址（给报错与「测试连接」自诊用）。"""
+        base = str(self._client.base_url).rstrip("/")
+        return f"{base}{url}" if url.startswith("/") else f"{base}/{url}"
+
     def request(
         self,
         method: str,
@@ -225,12 +311,21 @@ class ParaTranzClient:
         这类请求一旦被服务端执行，重试就会产生重复数据。所以只对
         「确定没被执行」的状态重试 —— 连接层错误（未送达）、429（被限流拒绝）、
         423（资源锁定拒绝）；对 5xx **不重试**，因为服务端可能已经写入。
+
+        **读超时与协议错不算「没送达」**：请求已经发出去，服务端可能已经处理完，
+        只是响应没回来。以前这个分支不看 `idempotent`，一律重试 —— 于是建任务 /
+        建术语 / 发讨论帖这些非幂等操作会真的在平台上留下两份。
         """
         url = self._url(path)
+        abs_url = self._abs_url(url)
         # 这些状态码表示请求**未被处理**，重试对任何方法都安全
         safe_retry = {423, 429}
         # 这些状态码表示服务端可能已经处理，只有幂等请求才敢重试
         risky_retry = {500, 502, 503, 504}
+        # 连接期错误：请求确定没送到 → 任何方法都能重试
+        not_sent = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+        # 可能已送达：只有幂等请求能重试
+        maybe_sent = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError)
         last: Exception | None = None
 
         for attempt in range(retries + 1):
@@ -239,7 +334,14 @@ class ParaTranzClient:
                 resp = self._client.request(
                     method, url, json=json_body, params=params, files=files, data=data
                 )
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+            except not_sent + maybe_sent as e:
+                if not idempotent and isinstance(e, maybe_sent):
+                    raise ParaTranzError(
+                        0,
+                        f"请求可能已被平台执行（{type(e).__name__}），不做重试以免重复写入：{e}",
+                        url,
+                        url=abs_url,
+                    ) from e
                 last = e
                 time.sleep(min(2 ** attempt, 10))
                 continue
@@ -248,33 +350,47 @@ class ParaTranzClient:
                 idempotent and resp.status_code in risky_retry
             )
             if retryable and attempt < retries:
-                last = ParaTranzError(resp.status_code, resp.text[:300], path)
+                last = ParaTranzError(resp.status_code, resp.text[:300], url, url=abs_url)
                 time.sleep(min(2 ** attempt, 10) + (1 if resp.status_code == 429 else 0))
                 continue
 
             if resp.status_code >= 400:
-                payload: dict[str, Any] = {}
-                try:
-                    payload = resp.json()
-                except Exception:
-                    payload = {"message": resp.text[:300]}
                 raise ParaTranzError(
                     resp.status_code,
-                    str(payload.get("message", "")),
-                    path,
-                    payload.get("id"),
+                    _error_message(resp),
+                    url,
+                    _error_id(resp),
+                    url=abs_url,
                 )
 
             if not expect_json:
                 return resp.content
             if not resp.content:
+                if method.upper() in ("GET", "HEAD"):
+                    # 2xx 却空 body：以前返回 None，被 unwrap_page 当成「这个项目没有数据」，
+                    # 于是 translate 报「没有待翻译词条，完成」、面板显示「词条 0」。
+                    # 网关/反代回空包时这就是假成功，必须报出来。
+                    raise ParaTranzError(
+                        resp.status_code, "响应体为空（期望 JSON）", url, url=abs_url
+                    )
                 return None
             try:
                 return resp.json()
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                if method.upper() in ("GET", "HEAD"):
+                    # 读接口回非 JSON，几乎只有一种原因：base_url 填成了站点根，
+                    # `/projects/1` 命中了前端路由，返回的是 HTML。
+                    raise ParaTranzError(
+                        resp.status_code,
+                        "响应不是 JSON（API 地址可能填错，或请求被登录页/反代拦截）："
+                        + resp.text[:160].replace("\n", " "),
+                        url,
+                        url=abs_url,
+                    ) from exc
+                # 写接口保留原文交给调用方判断（`_edit_result` 等会明确报形状未知）
                 return resp.text
 
-        raise ParaTranzError(0, f"重试耗尽: {last}", path)
+        raise ParaTranzError(0, f"重试耗尽: {last}", url, url=abs_url)
 
     # ------------------------------------------------------------- Projects
     def get_project(self) -> ProjectInfo:
@@ -288,9 +404,101 @@ class ParaTranzClient:
     def update_project(self, payload: dict) -> ProjectInfo:
         return ProjectInfo.model_validate(self.request("PUT", "/projects/{projectId}", json_body=payload))
 
+    # ------------------------------------------------- 连接失败时的自诊（只读）
+    def _get_anonymous(self, path: str) -> httpx.Response:
+        """不带 Token 的只读 GET（用同一个 base_url 与 transport，不污染主连接）。"""
+        self.limiter.acquire()
+        with httpx.Client(
+            base_url=str(self._client.base_url),
+            timeout=min(self._client.timeout.read or 15.0, 15.0),
+            follow_redirects=True,
+            headers={"Accept": "application/json", "User-Agent": DEFAULT_UA},
+            transport=self._transport,
+        ) as anon:
+            return anon.get(self._url(path))
+
+    def _in_public_catalog(self, max_pages: int = 8) -> tuple[bool, int]:
+        """当前 project_id 是否出现在**公开项目目录**里；返回 (是否命中, 扫描条数)。"""
+        scanned = 0
+        page = 1
+        while page <= max_pages:
+            data = self.request(
+                "GET", "/projects", params=[("page", page), ("pageSize", 1000)]
+            )
+            rows, meta = unwrap_page_meta(data, path="/projects")
+            if not rows:
+                break
+            scanned += len(rows)
+            for r in rows:
+                if isinstance(r, dict) and int(r.get("id") or 0) == self.project_id:
+                    return True, scanned
+            page_count = meta.get("pageCount")
+            if page_count is not None and page >= int(page_count):
+                break
+            page += 1
+        return False, scanned
+
+    def diagnose_project_access(self, *, catalog_pages: int = 8) -> list[str]:
+        """`GET /projects/{id}` 返回 404 时给出可执行的排查结论（只读）。
+
+        平台语义（2026-10 实测，别照 spec 想当然）：
+
+        - **公开项目**：无论带什么 Token（甚至假 Token、不带 Token）都返回 200；
+        - **私有项目**：只有该项目成员的 Token 才读得到；
+        - **项目不存在 / 私有且无权限 / Token 无效** —— 三者返回的都是
+          **同一个 404 `Not Found`**，平台不会回 401/403。
+
+        所以只报一个 404 等于什么都没说。这里用「去掉 Token 再读一次」和
+        「查公开目录」两条只读事实把范围收窄。
+        """
+        hints: list[str] = []
+        try:
+            anon = self._get_anonymous("/projects/{projectId}")
+        except (httpx.HTTPError, ParaTranzError) as exc:  # 自诊失败不能盖住原始错误
+            return [f"（自诊失败：{exc}）"]
+
+        if anon.status_code == 200:
+            hints.append(
+                f"项目 {self.project_id} 可公开访问（不带 Token 也能读到）："
+                "带上 Token 反而 404，说明这个 Token 无效或已过期。"
+                "请到 ParaTranz「个人设置 → API Token」重新生成后填入。"
+            )
+        elif anon.status_code == 404:
+            try:
+                found, scanned = self._in_public_catalog(max_pages=catalog_pages)
+            except (httpx.HTTPError, ParaTranzError) as exc:
+                hints.append(f"（无法核对公开项目目录：{exc}）")
+                found, scanned = False, 0
+            if found:
+                hints.append(
+                    f"项目 {self.project_id} 在公开目录中可见，但带 Token 读取仍然 404，"
+                    "请检查 Token 是否输入完整（不要把整段 `Authorization:` 前缀粘进来）。"
+                )
+            else:
+                hints.append(
+                    f"项目 {self.project_id} 不在公开项目目录里"
+                    + (f"（已扫描 {scanned} 个公开项目）" if scanned else "")
+                    + "：要么编号写错，要么它是私有项目、而当前 Token 所属账号不是该项目成员。"
+                )
+        else:
+            hints.append(
+                f"不带 Token 访问返回 HTTP {anon.status_code}，API 地址可能不是 ParaTranz 的接口根"
+                "（正确形式：https://paratranz.cn/api）。"
+            )
+
+        hints.append(
+            "编号要取项目页地址栏里的 /projects/<编号>（不是项目名、也不是文件页地址）。"
+        )
+        if "/api" not in self.base_url:
+            hints.append("API 地址缺少 /api 后缀，正确形式：https://paratranz.cn/api。")
+        return hints
+
     # ---------------------------------------------------------------- Files
     def list_files(self) -> list[FileItem]:
-        return [FileItem.model_validate(x) for x in self.request("GET", "/projects/{projectId}/files")]
+        """文件列表。真实平台给裸数组，但分页包已出现过一次（announcements），
+        这里统一走 `unwrap_page`：形状变了要报错，而不是去遍历字典的 key。"""
+        data = self.request("GET", "/projects/{projectId}/files")
+        return [FileItem.model_validate(x) for x in unwrap_page(data, path="/files")]
 
     def get_file(self, file_id: int) -> FileItem:
         return FileItem.model_validate(self.request("GET", f"/projects/{{projectId}}/files/{file_id}"))
@@ -300,7 +508,8 @@ class ParaTranzClient:
         data = self.request("GET", f"/projects/{{projectId}}/files/{file_id}/translation")
         if isinstance(data, str):
             data = json.loads(data)
-        return [StringItem.model_validate(x) for x in data]
+        path = f"/projects/*/files/{file_id}/translation"
+        return [StringItem.model_validate(x) for x in unwrap_page(data, path=path)]
 
     def update_file_translation(
         self,
@@ -365,7 +574,7 @@ class ParaTranzClient:
         self.request("DELETE", f"/projects/{{projectId}}/files/{file_id}")
 
     # -------------------------------------------------------------- Strings
-    def list_strings(
+    def _strings_page(
         self,
         *,
         page: int = 1,
@@ -374,7 +583,8 @@ class ParaTranzClient:
         task: int | None = None,
         stage: Stage | int | None = None,
         detailed: bool = False,
-    ) -> list[StringItem]:
+    ) -> tuple[list[StringItem], dict[str, Any]]:
+        """一页词条 + 平台给的分页元信息（`pageCount` 用来判断到底）。"""
         params: list[tuple[str, Any]] = [("page", page), ("pageSize", page_size)]
         for fid in file or []:
             params.append(("file", fid))
@@ -385,7 +595,42 @@ class ParaTranzClient:
         if detailed:
             params.append(("detailed", 1))
         data = self.request("GET", "/projects/{projectId}/strings", params=params)
-        return [StringItem.model_validate(x) for x in unwrap_page(data)]
+        rows, meta = unwrap_page_meta(data, path="/projects/*/strings")
+        return [StringItem.model_validate(x) for x in rows], meta
+
+    def page_strings(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 500,
+        file: Sequence[int] | None = None,
+        task: int | None = None,
+        stage: Stage | int | None = None,
+        detailed: bool = False,
+    ) -> tuple[list[StringItem], dict[str, Any]]:
+        """一页词条 + 分页元信息。
+
+        界面需要 `rowCount`/`pageCount` 才能显示"共多少条、第几页"，
+        所以把带元信息的那一层公开出来；`list_strings` 只是它的薄封装，
+        分页解包仍然只有 `unwrap_page_meta` 一处实现。
+        """
+        return self._strings_page(
+            page=page, page_size=page_size, file=file, task=task, stage=stage, detailed=detailed
+        )
+
+    def list_strings(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 500,
+        file: Sequence[int] | None = None,
+        task: int | None = None,
+        stage: Stage | int | None = None,
+        detailed: bool = False,
+    ) -> list[StringItem]:
+        return self.page_strings(
+            page=page, page_size=page_size, file=file, task=task, stage=stage, detailed=detailed
+        )[0]
 
     def iter_strings(
         self,
@@ -399,17 +644,23 @@ class ParaTranzClient:
     ) -> Iterator[StringItem]:
         """分页迭代词条。
 
-        两道兜底，防止平台行为异常时把调用方拖死：
+        三道终止条件，缺一不可：
+
         - `max_pages`（默认 2000 页 ≈ 100 万条）硬上限；
         - **重复 id 检测**：若平台忽略 `page` 参数一直返回同一页，第二次
-          见到重复 id 就终止，而不是无限循环。
+          见到重复 id 就终止，而不是无限循环；
+        - **以平台给的 `pageCount` 为准**。「这一页不足 pageSize 就是最后一页」
+          这个近似以前用过，是错的：平台可以把 `pageSize=500` 压到 50，
+          那样第 1 页就被当成最后一页 —— 整个项目只读到前 50 条，
+          而 translate 会报「没有待翻译词条，完成」。只有响应是裸数组
+          （没有分页元信息）时，才退回到条数判断。
         """
         page = 1
         hard_cap = max_pages or 2000
         seen: set[int] = set()
         yielded = 0
         while page <= hard_cap:
-            batch = self.list_strings(
+            batch, meta = self._strings_page(
                 page=page, page_size=page_size, file=file, task=task, stage=stage
             )
             if not batch:
@@ -424,7 +675,11 @@ class ParaTranzClient:
                 yielded += 1
                 if max_items and yielded >= max_items:
                     return
-            if len(batch) < page_size:
+            page_count = meta.get("pageCount")
+            if page_count is not None:
+                if page >= int(page_count):
+                    return
+            elif len(batch) < page_size:
                 return
             page += 1
 
@@ -485,9 +740,12 @@ class ParaTranzClient:
                 res = self.request(
                     "POST", "/projects/{projectId}/strings", json_body=body
                 )
-            except ParaTranzError as exc:
-                # 单条失败不中断整批，记下来让调用方展示
-                failed.append({"key": body["key"], "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - 单条失败不能丢掉已建成的部分
+                # 以前只捕 ParaTranzError：第 N 条抛个非预期异常就整批中断，
+                # 前面已建好的 N-1 条随异常一起丢掉 → 调用方以为「一条都没建成」，
+                # 重试后同 key 再建一遍，平台上留下半套词条。
+                kind = "" if isinstance(exc, ParaTranzError) else f"{type(exc).__name__}: "
+                failed.append({"key": body["key"], "error": f"{kind}{exc}"})
             else:
                 sid = (res or {}).get("id") if isinstance(res, dict) else None
                 if sid:
@@ -526,21 +784,28 @@ class ParaTranzClient:
         )
 
     # ---------------------------------------------------------------- Terms
+    def _terms_page(self, page: int = 1, page_size: int = 500) -> tuple[list[Term], dict[str, Any]]:
+        """一页术语 + 分页元信息（`pageCount` 用来判断到底）。"""
+        data = self.request(
+            "GET", "/projects/{projectId}/terms", params={"page": page, "pageSize": page_size}
+        )
+        rows, meta = unwrap_page_meta(data, path="/projects/*/terms")
+        return [Term.model_validate(x) for x in rows], meta
+
     def list_terms(self, page: int = 1, page_size: int = 500) -> list[Term]:
-        data = self.request("GET", "/projects/{projectId}/terms", params={"page": page, "pageSize": page_size})
-        return [Term.model_validate(x) for x in unwrap_page(data)]
+        return self._terms_page(page=page, page_size=page_size)[0]
 
     def iter_terms(self, page_size: int = 500, max_pages: int = 400) -> Iterator[Term]:
         """分页迭代术语。
 
-        与 `iter_strings` 同一套兜底：硬页数上限 + 重复 id 检测。
-        没有这两条时，平台一旦忽略 `page` 参数就**无限循环**（实测：一直请求
-        第 N 页），`sync_terms_from_platform` 会挂死，而用户只看到"卡住了"。
+        与 `iter_strings` 同一套终止条件：`pageCount` 优先 + 重复 id 检测 +
+        硬页数上限。缺了「重复 id 检测」时，平台一旦忽略 `page` 参数就**无限循环**
+        （实测：一直请求第 N 页），`sync_terms_from_platform` 会挂死，用户只看到"卡住了"。
         """
         page = 1
         seen: set[int] = set()
         while page <= max_pages:
-            batch = self.list_terms(page=page, page_size=page_size)
+            batch, meta = self._terms_page(page=page, page_size=page_size)
             if not batch:
                 return
             fresh = [t for t in batch if t.id not in seen]
@@ -550,7 +815,11 @@ class ParaTranzClient:
             for t in fresh:
                 seen.add(t.id)
             yield from fresh
-            if len(batch) < page_size:
+            page_count = meta.get("pageCount")
+            if page_count is not None:
+                if page >= int(page_count):
+                    return
+            elif len(batch) < page_size:
                 return
             page += 1
 
@@ -591,7 +860,14 @@ class ParaTranzClient:
     # ---------------------------------------------------------------- Tasks
     def list_tasks(self, page: int = 1, page_size: int = 50) -> list[Task]:
         data = self.request("GET", "/projects/{projectId}/tasks", params={"page": page, "pageSize": page_size})
-        return [Task.model_validate(x) for x in unwrap_page(data)]
+        return [Task.model_validate(x) for x in unwrap_page(data, path="/projects/*/tasks")]
+
+    def iter_tasks(self, *, page_size: int = 50, max_pages: int = 40) -> Iterator[Task]:
+        """**全部**任务（跨页）。报「平台任务 N 个」时用它，别拿单页长度当总数。"""
+        for row in self._iter_rows(
+            "/projects/{projectId}/tasks", page_size=page_size, max_pages=max_pages
+        ):
+            yield Task.model_validate(row)
 
     def create_task(
         self,
@@ -603,7 +879,9 @@ class ParaTranzClient:
         bumped: bool = False,
     ) -> Task:
         body: dict[str, Any] = {
-            "title": title[:128],
+            # 不在这里静默截断：平台标题上限 128，调用方（plan）负责截断并记账，
+            # 偷偷截断会让「本地报表的标题」和「平台上的标题」对不上，用户按标题搜不到。
+            "title": _bounded_title(title),
             "content": content,
             "goal": goal or {"translate": 1.0, "check": 0.0, "review": 0.0},
             "deadline": deadline,
@@ -664,6 +942,54 @@ class ParaTranzClient:
                 total[k] += int(res.get(k, 0) or 0)
         return total
 
+    # ------------------------------------------------------ 列表翻页（唯一实现）
+    def _iter_rows(
+        self,
+        path: str,
+        *,
+        page_size: int = 50,
+        max_pages: int = 40,
+        params: Sequence[tuple[str, Any]] = (),
+    ) -> Iterator[dict]:
+        """把一个分页列表接口翻完，产出未做模型校验的 dict。
+
+        终止条件与 `iter_strings` 同一套：`pageCount` 优先，退化时看条数，
+        外加重复 id 检测（平台忽略 page 参数时不会空转）与硬页数上限。
+
+        存在的理由：公告与讨论都吃过「只看第 1 页」的亏 —— 目标被挤到第 2 页后，
+        「已存在则更新」变成「每轮新建一条」，而平台上的重复帖子/公告比失败更难收拾。
+        """
+        page = 1
+        seen: set[int] = set()
+        while page <= max_pages:
+            q: list[tuple[str, Any]] = [*params, ("page", page), ("pageSize", page_size)]
+            rows, meta = unwrap_page_meta(self.request("GET", path, params=q), path=path)
+            if not rows:
+                return
+            fresh: list[dict] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ParaTranzError(
+                        0, f"列表项不是对象：{type(row).__name__}", path
+                    )
+                rid = row.get("id")
+                if isinstance(rid, int):
+                    if rid in seen:
+                        continue
+                    seen.add(rid)
+                fresh.append(row)
+            if not fresh:
+                # 全是见过的 id → 平台没有真的翻页，停止而不是空转
+                return
+            yield from fresh
+            page_count = meta.get("pageCount")
+            if page_count is not None:
+                if page >= int(page_count):
+                    return
+            elif len(rows) < page_size:
+                return
+            page += 1
+
     # --------------------------------------------------------- Announcements
     def list_announcements(self, page: int = 1, page_size: int = 50) -> list[Announcement]:
         data = self.request(
@@ -672,7 +998,17 @@ class ParaTranzClient:
         # 真实平台这里返回分页包（实测 2026-10-23：{page,pageCount,pageSize,rowCount,results}）。
         # 漏掉 unwrap_page 会让 styleguide 的「已存在则更新」永远匹配不到 →
         # 每跑一次多一条重复公告，而且异常被 except 吞掉，表面上一切正常。
-        return [Announcement.model_validate(x) for x in unwrap_page(data)]
+        return [
+            Announcement.model_validate(x)
+            for x in unwrap_page(data, path="/projects/*/announcements")
+        ]
+
+    def iter_announcements(self, *, page_size: int = 50, max_pages: int = 40) -> Iterator[Announcement]:
+        """**全部**公告（跨页）。找「有没有同名公告」必须用它，不能用只看第一页的那版。"""
+        for row in self._iter_rows(
+            "/projects/{projectId}/announcements", page_size=page_size, max_pages=max_pages
+        ):
+            yield Announcement.model_validate(row)
 
     def create_announcement(
         self,
@@ -750,7 +1086,23 @@ class ParaTranzClient:
         if status is not None:
             params["status"] = status
         data = self.request("GET", "/projects/{projectId}/issues", params=params)
-        return [x for x in unwrap_page(data) if isinstance(x, dict)]
+        return unwrap_page(data, path="/projects/*/issues")
+
+    def iter_issues(
+        self, *, status: int | None = 0, page_size: int = 50, max_pages: int = 40
+    ) -> Iterator[dict]:
+        """**全部**讨论（跨页）。review 找自己那条「打回明细」台账帖必须用它。
+
+        只看第 1 页时，未关闭讨论一多，台账帖就被挤出第一页 → 以为没有 →
+        每轮新建一条重复帖（公告已经吃过这个亏）。
+        """
+        extra: list[tuple[str, Any]] = [] if status is None else [("status", status)]
+        yield from self._iter_rows(
+            "/projects/{projectId}/issues",
+            page_size=page_size,
+            max_pages=max_pages,
+            params=extra,
+        )
 
     # -------------------------------------------------- Members / history ...
     def list_members(self) -> list[Member]:

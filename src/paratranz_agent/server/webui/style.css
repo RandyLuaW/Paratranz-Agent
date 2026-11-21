@@ -836,3 +836,25 @@ a.btn {
 }
 a.btn:hover { border-color: var(--accent); color: var(--accent); }
 a.btn.sm { padding: 3px 9px; font-size: 11.5px; }
+
+/* ---------- 文件页：可展开的词条面板 ---------- */
+tr.filerow { cursor: pointer; }
+tr.filerow:hover > td { background: var(--panel-2); }
+tr.filerow.open > td { background: var(--panel-2); }
+tr.filerow .caret { display: inline-block; width: 14px; color: var(--dim); }
+tr.filepanel > td {
+  padding: 0 0 10px 0;
+  background: transparent;
+  border-bottom: 1px solid var(--border);
+}
+.filepanel-in {
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--accent-bg);
+}
+.fp-table { margin-top: 2px; }
+.fp-table td[data-editable] { cursor: text; vertical-align: top; }
+.fp-table td[data-editable]:hover { box-shadow: inset 0 0 0 1px var(--border-2); border-radius: 4px; }
+.fp-table .st-tr-text { white-space: pre-wrap; line-height: 1.45; }
+/* 没有 AI 状态时不要留一个空标签的位置 */
+.tag.st-live:empty { display: none; }

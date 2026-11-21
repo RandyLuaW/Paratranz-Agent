@@ -14,6 +14,7 @@ from . import (
     models,
     project,
     settings,
+    strings,
     usage,
     writeback,
 )
@@ -31,3 +32,4 @@ def register_all(app: FastAPI, d: Deps) -> None:
     models.register(app, d)
     extract.register(app, d)
     writeback.register(app, d)
+    strings.register(app, d)
