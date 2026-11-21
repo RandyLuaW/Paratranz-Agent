@@ -279,3 +279,47 @@ def test_sync_terms_hard_failure_raises_by_default(client, cfg, store, monkeypat
     assert stats.terms_sync["ok"] is False
     assert stats.terms_sync["reason"] == "error"
     assert stats.written == 21, "术语同步失败不该拖住翻译"
+
+
+def test_event_contract_blocked_has_no_stage_written_has_stage(client, cfg, store):
+    """事件契约：被拦 ≠ 已写入。
+
+    真实反馈（2026-11-22）：任务报表说「写入 192、被拦 8」，但界面里那 8 条
+    看起来也像已写入 —— 因为 ok/blocked 事件都带 `translation`，前端见到就往
+    译文格写；同时 written 事件没带 `stage`，徽章反而从不更新。
+
+    契约：`written` 必须带 `stage`（前端据此改徽章）；`blocked` 不得带 `stage`
+    （没落库就不许显示成已翻译），只能带原因。
+    """
+    from paratranz_agent.pipelines.translate import TranslatePipeline
+    from tests.fake_llm import FakeLLM
+
+    # 丢掉占位符的译文 → 必被 check_placeholders 硬拦
+    class DroppingLLM(FakeLLM):
+        def chat(self, messages, **kw):
+            raw = super().chat(messages, **kw)
+            try:
+                d = json.loads(raw)
+            except Exception:
+                return raw
+            if isinstance(d, dict) and d.get("items"):
+                d["items"][0]["translation"] = ""      # 空译文 -> 必被 check_placeholders 拦
+            return json.dumps(d, ensure_ascii=False)
+
+    events: list[dict] = []
+    pipe = TranslatePipeline(client, cfg, store, DroppingLLM())
+    stats = pipe.run(dry_run=False, limit=6, on_items=lambda rows: events.extend(rows))
+
+    assert stats.blocked >= 1, "这一轮至少要有一条被拦，否则断言没意义"
+    blocked = [e for e in events if e["status"] == "blocked"]
+    written = [e for e in events if e["status"] == "written"]
+    assert blocked and written
+    for e in blocked:
+        assert "stage" not in e, f"被拦的条目不许带 stage：{e}"
+        assert e.get("reason")
+    for e in written:
+        assert e.get("stage") == 1, f"写回事件必须带 stage=1：{e}"
+
+    # 被拦样本要能点名（用户由此追查是哪几条）
+    samples = stats.as_dict()["blocked_samples"]
+    assert samples and {"id", "reason", "original"} <= set(samples[0])

@@ -125,6 +125,13 @@ class TranslateStats:
             "llm_ok": self.llm_ok,
             "written": self.written,
             "blocked": self.blocked,
+            # 被拦样本（最多 20 条）：界面上要能点名"是哪几条被拦、为什么"，
+            # 只给一个数字的话用户无从追查（真实反馈）。
+            "blocked_samples": [
+                {"id": b.get("id"), "reason": b.get("reason", ""),
+                 "original": (b.get("original") or "")[:120]}
+                for b in self.blocked_samples[:20]
+            ],
             "failed": self.failed,
             "skipped_short": self.skipped_short,
             "files_unmatched": self.files_unmatched,
@@ -774,7 +781,16 @@ class TranslatePipeline:
                     # 分片推送：一次塞进几千条会让 SSE 事件体积失控，
                     # 界面一次也只显示一屏（分片后能边收边刷）
                     rows = [
-                        {"id": w["id"], "translation": w["translation"], "status": "written"}
+                        {
+                            "id": w["id"],
+                            "translation": w["translation"],
+                            # 只有**真的写回平台**了才带 stage：前端据此把徽章改成
+                            # 「已翻译」。ok/blocked 事件不带 stage —— 模型产出不等于落库，
+                            # 被拦的条目更不能看起来像写过（真实反馈：被拦的 8 条
+                            # 在列表里也显示成已写入）。
+                            "status": "written",
+                            "stage": int(w.get("stage") or Stage.TRANSLATED),
+                        }
                         for w in writes
                         if w["id"] in by_id
                     ]

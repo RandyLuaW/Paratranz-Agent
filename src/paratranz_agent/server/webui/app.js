@@ -548,6 +548,17 @@ function jobCard(j) {
     </div>
     <div class="bd">
       ${j.error ? `<div style="color:var(--err);font-size:12.5px">${esc(j.error)}</div>` : ''}
+      ${(j.result && j.result.blocked_samples && j.result.blocked_samples.length) ? `
+        <div class="notice warn" style="font-size:12px">
+          <b>被拦 ${j.result.blocked || j.result.blocked_samples.length} 条</b>：占位符/控制符不一致或空译文，
+          <b>未写回平台</b>（这几条在平台上仍是原状态，不要当成已翻译）。
+          <ul style="margin:6px 0 0 18px;padding:0">
+            ${j.result.blocked_samples.slice(0, 10).map((b) => `<li>
+              <span class="mono">${esc(String(b.id))}</span>
+              ${esc(clip(b.original || '', 60))}
+              <span class="dim">— ${esc(b.reason || '')}</span></li>`).join('')}
+          </ul>
+        </div>` : ''}
       ${j.result ? `<pre class="result">${esc(JSON.stringify(j.result, null, 2))}</pre>` : ''}
       ${j.logs && j.logs.length
         ? `<pre class="result">${j.logs.map((l) => `[${fmtTime(l.ts)}] ${esc(l.msg)}`).join('\n')}</pre>`
@@ -950,8 +961,12 @@ const STR_LIVE_NAME = {
   written: '已写入', ended: '未回结果',
   pass: '校对通过', dispute: '打回', reset: '重置未翻译', skip: '未判定',
 };
-/* 校对结果 → 阶段徽章（写回事件自带 stage 时以它为准） */
-const LIVE_STATUS_STAGE = { pass: 3, dispute: 2, reset: 0 };
+/* 校对结果 → 阶段徽章（写回事件自带 stage 时以它为准）。
+ * 关键：只有"真的写回平台"的状态才映射阶段。`ok`（模型产出）与 `blocked`（被拦）
+ * 都不映射 —— 曾经把模型产出当已写入，导致被拦的条目在列表里也显示「已翻译」。 */
+const LIVE_STATUS_STAGE = { written: 1, pass: 3, dispute: 2, reset: 0 };
+/* 这些状态才有资格改译文格：被拦/失败的译文**没有落库**，绝不能进列表 */
+const LIVE_STATUS_HAS_TEXT = new Set(['ok', 'tm', 'written']);
 
 /* 截断不能切在代理对中间：emoji/增补平面字符会被切成半个（显示成 ���） */
 function clip(text, n) {
@@ -1067,8 +1082,11 @@ function applyLiveItems(items) {
       }
       // **只动译文格**：querySelector('.st-tr-text') 取到的是第一个（原文），
       // 实测会把产出写进原文列、把原文冲掉。
+      // **只动译文格**，而且只有"已落库/已产出可用译文"的状态才写：
+      // 被拦与被失败的条目也带着模型原文，写进去会让它们看起来像已处理。
       const cell = row.querySelector('.st-trans');
-      if (cell && typeof it.translation === 'string' && it.translation) {
+      if (cell && LIVE_STATUS_HAS_TEXT.has(it.status)
+          && typeof it.translation === 'string' && it.translation) {
         cell.textContent = it.translation;
       }
       const stage = it.stage != null ? Number(it.stage) : LIVE_STATUS_STAGE[it.status];
@@ -1094,7 +1112,9 @@ function patchLocalItem(id, it) {
   [state.str.items, state.fileView.items].forEach((arr) => {
     const row = (arr || []).find((r) => r.id === id);
     if (!row) return;
-    if (typeof it.translation === 'string' && it.translation) row.translation = it.translation;
+    if (typeof it.translation === 'string' && it.translation && LIVE_STATUS_HAS_TEXT.has(it.status)) {
+      row.translation = it.translation;
+    }
     if (stage != null && !Number.isNaN(stage)) row.stage = stage;
   });
 }
